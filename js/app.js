@@ -571,7 +571,7 @@ function updateDirectGlideLineGeometry() {
  * Initialize Unified Web Worker (`js/mission-worker.js`)
  */
 function initWorker() {
-  worker = new Worker('/js/mission-worker.js?v=1.2', { type: 'module' });
+  worker = new Worker('/js/mission-worker.js?v=1.3', { type: 'module' });
 
   worker.onmessage = async (e) => {
     const msg = e.data;
@@ -908,12 +908,6 @@ function triggerTerrainSafetyCompute(forceRebuildEnvelope = false) {
 
 function triggerGlideAndAircraftCompute() {
   if (!worker) return;
-  const effMin = Math.max(0, state.batteryTimeMin - state.postArrivalDescentMin);
-  const effEl = document.getElementById('readout-effective-glide-min');
-  if (effEl) {
-    effEl.textContent = `${effMin.toFixed(1)} min`;
-    effEl.style.color = effMin > 0 ? '#4ade80' : '#f87171';
-  }
 
   worker.postMessage({
     type: 'COMPUTE_GLIDE_AND_AIRCRAFT',
@@ -926,7 +920,6 @@ function triggerGlideAndAircraftCompute() {
       lfSafetyMarginFt: state.lfSafetyMarginFt,
       ridgeClearanceFt: state.ridgeClearanceFt,
       batteryTimeMin: state.batteryTimeMin,
-      postArrivalDescentMin: state.postArrivalDescentMin,
       glideSpeedKts: state.glideSpeedKts,
       glideRodFpm: state.glideRodFpm,
       windLayers: state.windLayers,

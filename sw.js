@@ -3,7 +3,7 @@
  * Offline App-Shell Caching + Stale-While-Revalidate for Map & DEM Tiles
  */
 
-const CACHE_NAME = 'uav-mission-planner-v1.2';
+const CACHE_NAME = 'uav-mission-planner-v1.3';
 const APP_SHELL = [
   '/',
   '/index.html',
