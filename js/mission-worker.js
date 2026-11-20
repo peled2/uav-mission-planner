@@ -1086,15 +1086,13 @@ function computeLandingFieldCatchmentPolygon(params, tables) {
     hUavFt,
     lfSafetyMarginFt,
     ridgeClearanceFt,
-    batteryTimeMin,
-    postArrivalDescentMin = 0
+    batteryTimeMin
   } = params;
 
   const { groundFt, radialTerrainFt } = lfCachedOrigin;
   if (!radialTerrainFt) return { polygonLatLons: [], rayDetails: [], lfGroundFt: groundFt };
 
   const arrivalTargetFt = groundFt + lfSafetyMarginFt;
-  const effectiveGlideBatteryMin = batteryTimeMin - postArrivalDescentMin;
   const stepNm = GLIDE_STEP_KM * KM_TO_NM;
   const latRad = latLf * DEG_TO_RAD;
   const lonRad = lonLf * DEG_TO_RAD;
@@ -1119,9 +1117,17 @@ function computeLandingFieldCatchmentPolygon(params, tables) {
     let bestTimeMin = 0;
     let limitedByTerrain = false;
 
-    if (hUavFt > arrivalTargetFt && effectiveGlideBatteryMin > 0) {
+    if (hUavFt > arrivalTargetFt && batteryTimeMin > 0) {
       for (let sIdx = 0; sIdx < candidateSpeeds.length; sIdx++) {
         const { speedKts, rodFpm } = candidateSpeeds[sIdx];
+        // Total descent from hUavFt down to landing field ground (groundFt) at constant rodFpm
+        // takes totalDescentTimeMin = (hUavFt - groundFt) / rodFpm (glide + post-arrival descent over field).
+        // If totalDescentTimeMin > batteryTimeMin, battery expires before reaching groundFt regardless of distance!
+        const totalDescentTimeToGroundMin = (hUavFt - groundFt) / rodFpm;
+        if (totalDescentTimeToGroundMin > batteryTimeMin) {
+          continue;
+        }
+
         let reqAltFt = arrivalTargetFt;
         let elapsedMin = 0.0;
         let reachedKm = 0.0;
@@ -1150,12 +1156,10 @@ function computeLandingFieldCatchmentPolygon(params, tables) {
           const dtMin = (stepNm / gsKts) * 60.0;
           const dhFt = rodFpm * dtMin;
 
-          if (reqAltFt + dhFt > hUavFt || elapsedMin + dtMin > effectiveGlideBatteryMin) {
-            const fracAlt = dhFt > 0 ? (hUavFt - reqAltFt) / dhFt : 1.0;
-            const fracTime = dtMin > 0 ? (effectiveGlideBatteryMin - elapsedMin) / dtMin : 1.0;
-            const frac = Math.max(0.0, Math.min(1.0, Math.min(fracAlt, fracTime)));
-            reachedKm += frac * GLIDE_STEP_KM;
-            elapsedMin += frac * dtMin;
+          if (reqAltFt + dhFt > hUavFt) {
+            const fracAlt = dhFt > 0 ? Math.max(0.0, Math.min(1.0, (hUavFt - reqAltFt) / dhFt)) : 1.0;
+            reachedKm += fracAlt * GLIDE_STEP_KM;
+            elapsedMin += fracAlt * dtMin;
             break;
           }
 
@@ -1203,7 +1207,8 @@ function computeLandingFieldCatchmentPolygon(params, tables) {
  * Evaluate 360° Outward Aircraft Glide Ring ("טבעת מטוס"):
  * Along each azimuth `theta` outward from the Aircraft (latUav, lonUav), traces forward from H_UAV
  * checking intermediate terrain clearance (terrain + ridgeClearanceFt), arrival floor
- * (max(lfArrivalTargetFt, terrain + ridgeClearanceFt)), and effective battery time (batteryTimeMin - postArrivalDescentMin).
+ * (max(lfArrivalTargetFt, terrain + ridgeClearanceFt)), and electrical potential including
+ * resultant post-arrival descent time to ground: (currAltFt - destGroundFt) / rodFpm.
  */
 function computeAircraftOutwardGlideRing(params, tables) {
   const {
@@ -1212,8 +1217,7 @@ function computeAircraftOutwardGlideRing(params, tables) {
     hUavFt,
     lfSafetyMarginFt,
     ridgeClearanceFt,
-    batteryTimeMin,
-    postArrivalDescentMin = 0
+    batteryTimeMin
   } = params;
 
   const { groundFt: uavGroundFt, radialTerrainFt } = uavCachedOrigin;
@@ -1221,7 +1225,6 @@ function computeAircraftOutwardGlideRing(params, tables) {
 
   const lfGroundFt = lfCachedOrigin.groundFt || 0;
   const lfArrivalTargetFt = lfGroundFt + lfSafetyMarginFt;
-  const effectiveGlideBatteryMin = batteryTimeMin - postArrivalDescentMin;
 
   const stepNm = GLIDE_STEP_KM * KM_TO_NM;
   const latRad = latUav * DEG_TO_RAD;
@@ -1241,9 +1244,14 @@ function computeAircraftOutwardGlideRing(params, tables) {
 
     let bestDistKm = 0.05;
 
-    if (effectiveGlideBatteryMin > 0 && hUavFt > uavGroundFt + ridgeClearanceFt) {
+    if (batteryTimeMin > 0 && hUavFt > uavGroundFt + ridgeClearanceFt) {
       for (let sIdx = 0; sIdx < candidateSpeeds.length; sIdx++) {
         const { speedKts, rodFpm } = candidateSpeeds[sIdx];
+        // Check if battery is sufficient for total descent from H_UAV down to landing field ground
+        if ((hUavFt - lfGroundFt) / rodFpm > batteryTimeMin) {
+          continue;
+        }
+
         let currAltFt = hUavFt;
         let elapsedMin = 0.0;
         let maxValidArrivalKm = 0.0;
@@ -1268,12 +1276,10 @@ function computeAircraftOutwardGlideRing(params, tables) {
           const ridgeFloorFt = terrFt + ridgeClearanceFt;
           const arrivalFloorFt = Math.max(lfArrivalTargetFt, ridgeFloorFt);
 
-          if (nextTimeMin > effectiveGlideBatteryMin || nextAltFt < ridgeFloorFt) {
+          if (nextAltFt < ridgeFloorFt) {
             if (currAltFt >= arrivalFloorFt) {
-              const fracAlt = dhFt > 0 ? Math.max(0, (currAltFt - arrivalFloorFt) / dhFt) : 0;
-              const fracTime = dtMin > 0 ? Math.max(0, (effectiveGlideBatteryMin - elapsedMin) / dtMin) : 0;
-              const frac = Math.min(1.0, Math.min(fracAlt, fracTime));
-              const candidateKm = (k - 1 + frac) * GLIDE_STEP_KM;
+              const fracAlt = dhFt > 0 ? Math.max(0, Math.min(1.0, (currAltFt - arrivalFloorFt) / dhFt)) : 0;
+              const candidateKm = (k - 1 + fracAlt) * GLIDE_STEP_KM;
               if (candidateKm > maxValidArrivalKm) maxValidArrivalKm = candidateKm;
             }
             break;
@@ -1312,7 +1318,10 @@ function computeAircraftOutwardGlideRing(params, tables) {
 
 /**
  * Direct Terrain-Aware Glide Path Simulation from Aircraft (latUav, lonUav) to Landing Field (latLf, lonLf)
- * Builds dense cross-section profile + exact pass/fail diagnostics including post-arrival descent battery check.
+ * Computes resultant post-arrival descent time over the field:
+ *   postArrivalDescentMin = Math.max(0, arrivalAltFt - lfGroundFt) / rodFpm
+ *   totalMissionTimeMin = timeToLfMin + postArrivalDescentMin
+ * If totalMissionTimeMin > batteryTimeMin -> no electrical potential!
  */
 async function evaluateDirectGlideToLandingField(params, tables) {
   const {
@@ -1323,8 +1332,7 @@ async function evaluateDirectGlideToLandingField(params, tables) {
     hUavFt,
     lfSafetyMarginFt,
     ridgeClearanceFt,
-    batteryTimeMin,
-    postArrivalDescentMin = 0
+    batteryTimeMin
   } = params;
 
   const totalDistKm = haversineDistanceKm(latUav, lonUav, latLf, lonLf);
@@ -1336,7 +1344,6 @@ async function evaluateDirectGlideToLandingField(params, tables) {
   const uavGroundFt = Math.round(uavGroundM * M_TO_FT);
   const lfGroundFt = Math.round(lfGroundM * M_TO_FT);
   const arrivalTargetFt = lfGroundFt + lfSafetyMarginFt;
-  const effectiveGlideBatteryMin = batteryTimeMin - postArrivalDescentMin;
 
   // Sample terrain along the direct path from Aircraft (d=0) to Landing Field (d=totalDistKm)
   const numSteps = Math.max(40, Math.min(240, Math.ceil(totalDistKm / 0.2)));
@@ -1426,15 +1433,18 @@ async function evaluateDirectGlideToLandingField(params, tables) {
       if (i < numSteps && currAltFt < pathTerrainFt[i] + ridgeClearanceFt && hitRidgeIdx === -1) {
         hitRidgeIdx = i;
       }
-      if (elapsedMin > effectiveGlideBatteryMin && batteryExpiredIdx === -1) {
+      if (elapsedMin > batteryTimeMin && batteryExpiredIdx === -1) {
         batteryExpiredIdx = i;
       }
     }
 
     const arrivalAltFt = altProfileFt[numSteps];
+    const arrivalHeightAboveLfFt = Math.max(0, arrivalAltFt - lfGroundFt);
     const arrivalMarginFt = arrivalAltFt - arrivalTargetFt;
+    // Resultant post-arrival descent time to spiral/descend from arrivalAltFt down to landing field ground (lfGroundFt)
+    const postArrivalDescentMin = rodFpm > 0 ? arrivalHeightAboveLfFt / rodFpm : 0;
     const totalMissionTimeMin = elapsedMin + postArrivalDescentMin;
-    const hasElectricalPotential = totalMissionTimeMin <= batteryTimeMin && effectiveGlideBatteryMin > 0;
+    const hasElectricalPotential = totalMissionTimeMin <= batteryTimeMin;
 
     const isSuccess =
       hitRidgeIdx === -1 &&
@@ -1453,6 +1463,8 @@ async function evaluateDirectGlideToLandingField(params, tables) {
         speedKts,
         rodFpm,
         elapsedMin,
+        arrivalHeightAboveLfFt,
+        postArrivalDescentMin,
         totalMissionTimeMin,
         hasElectricalPotential,
         arrivalAltFt,
@@ -1480,6 +1492,8 @@ async function evaluateDirectGlideToLandingField(params, tables) {
   } else if (!bestCandidate.isSuccess) {
     if (bestCandidate.hitRidgeIdx !== -1) {
       statusCode = 'BLOCKED_BY_RIDGE';
+    } else if (bestCandidate.arrivalMarginFt < 0) {
+      statusCode = 'OUT_OF_RANGE';
     } else if (!bestCandidate.hasElectricalPotential || bestCandidate.batteryExpiredIdx !== -1) {
       statusCode = 'BATTERY_LIMIT';
     } else {
@@ -1518,7 +1532,8 @@ async function evaluateDirectGlideToLandingField(params, tables) {
     optimalSpeedKts: bestCandidate.speedKts,
     rodFpm: bestCandidate.rodFpm,
     timeToLfMin: bestCandidate.elapsedMin,
-    postArrivalDescentMin,
+    arrivalHeightAboveLfFt: Math.round(bestCandidate.arrivalHeightAboveLfFt),
+    postArrivalDescentMin: bestCandidate.postArrivalDescentMin,
     totalMissionTimeMin: bestCandidate.totalMissionTimeMin,
     batteryTimeMin,
     arrivalAltFt: Math.round(bestCandidate.arrivalAltFt),
@@ -1553,7 +1568,6 @@ async function runGlideAndAircraftEvaluation(params) {
     lfSafetyMarginFt,
     ridgeClearanceFt,
     batteryTimeMin,
-    postArrivalDescentMin = 0,
     glideSpeedKts = 60,
     glideRodFpm = 500,
     windLayers,

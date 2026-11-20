@@ -340,17 +340,9 @@
                 </div>
 
                 <div class="mini-input-card">
-                  <label for="input-battery-min">זמן סוללה כולל</label>
+                  <label for="input-battery-min">זמן סוללה בחירום</label>
                   <div class="num-box-with-unit full-w" dir="ltr">
                     <input type="number" id="input-battery-min" min="1" max="180" step="1" value="25" />
-                    <span>min</span>
-                  </div>
-                </div>
-
-                <div class="mini-input-card">
-                  <label for="input-post-descent-min">זמן הנמכה מעל השדה</label>
-                  <div class="num-box-with-unit full-w" dir="ltr">
-                    <input type="number" id="input-post-descent-min" min="0" max="120" step="1" value="5" />
                     <span>min</span>
                   </div>
                 </div>
@@ -372,9 +364,16 @@
                 </div>
               </div>
 
-              <div class="sub-readout">
-                <span>זמן גלישה מירבי לשדה (סוללה פחות הנמכה):</span>
-                <bdi id="readout-effective-glide-min" class="mono-val" dir="ltr">20.0 min</bdi>
+              <!-- Resultant Electrical Potential & Post-Arrival Descent Readouts -->
+              <div class="resultant-times-box">
+                <div class="sub-readout">
+                  <span>גובה הגעה מעל השדה ⬅ זמן הנמכה מעל השדה:</span>
+                  <bdi id="readout-post-arrival-descent" class="mono-val" dir="ltr">-- ft ⬅ -- min</bdi>
+                </div>
+                <div class="sub-readout">
+                  <span>סה"כ זמן נדרש (גלישה + הנמכה) מול סוללה:</span>
+                  <bdi id="readout-total-electrical-time" class="mono-val" dir="ltr">-- / -- min</bdi>
+                </div>
               </div>
             </div>
 
@@ -397,26 +396,35 @@
 
               <!-- Real-time / Forecast Status Bar -->
               <div id="wind-api-status-row" class="sub-readout">
-                <span id="wind-status-label">נתוני רוח למיקום המטוס:</span>
+                <span id="wind-status-label">נתוני רוח למסלול הגלישה:</span>
                 <div class="header-actions">
                   <bdi id="wind-status-val" class="mono-val" dir="ltr">טוען...</bdi>
                   <button type="button" id="btn-refresh-wind" class="action-mini-btn" title="רענן נתוני רוח מהאינטרנט">🔄</button>
                 </div>
               </div>
 
-              <!-- Manual Add Row Button (shown when 'manual' mode is active) -->
-              <div id="wind-manual-toolbar" class="block-header" style="display: none;">
-                <span class="helper-note">ניתן לערוך או להוסיף שכבות רוח ידנית:</span>
-                <button type="button" id="btn-add-wind-row" class="action-mini-btn">+ הוסף שכבה</button>
+              <!-- Collapsible Submenu for Wind Details by Altitude (Closed by Default!) -->
+              <div class="wind-submenu-header">
+                <button type="button" id="btn-toggle-wind-details" class="submenu-toggle-btn" aria-expanded="false">
+                  <span>פירוט שכבות רוח לפי גובה (1,000 רגל)</span>
+                  <span id="wind-submenu-arrow">הצג פירוט ▾</span>
+                </button>
               </div>
 
-              <div class="table-head-row wind-head" dir="ltr">
-                <span>Alt (1,000 ft)</span>
-                <span>Speed (kts)</span>
-                <span>From (°)</span>
-                <span></span>
+              <div id="wind-details-body" class="wind-details-body is-collapsed">
+                <div id="wind-manual-toolbar" class="block-header" style="display: none;">
+                  <span class="helper-note">ניתן לערוך או להוסיף שכבות רוח ידנית:</span>
+                  <button type="button" id="btn-add-wind-row" class="action-mini-btn">+ הוסף שכבה</button>
+                </div>
+
+                <div class="table-head-row wind-head" dir="ltr">
+                  <span>Alt (1,000 ft)</span>
+                  <span>Speed (kts)</span>
+                  <span>From (°)</span>
+                  <span></span>
+                </div>
+                <div id="wind-rows-container" class="dynamic-rows"></div>
               </div>
-              <div id="wind-rows-container" class="dynamic-rows"></div>
             </div>
 
             <!-- Embedded Direct Glide Trajectory Cross-Section Chart -->

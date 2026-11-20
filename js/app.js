@@ -315,14 +315,22 @@ function initMap() {
     interactive: false
   }).addTo(map);
 
-  // 5. Aircraft Outward Glide Ring ("טבעת מטוס")
+  // 5. Aircraft Outward Glide Ring ("טבעת מטוס") - High-Contrast Electric Blue with Dark Halo
+  uavGlideRingHaloLayer = L.polygon([], {
+    color: '#050b12',
+    weight: 5.5,
+    opacity: 0.85,
+    fill: false,
+    interactive: false
+  });
+
   uavGlideRingLayer = L.polygon([], {
-    color: '#f59e0b',
-    weight: 2.4,
-    opacity: 0.95,
-    dashArray: '6 4',
-    fillColor: '#f59e0b',
-    fillOpacity: 0.11,
+    color: '#2563eb',
+    weight: 3.0,
+    opacity: 1.0,
+    dashArray: '8 5',
+    fillColor: '#3b82f6',
+    fillOpacity: 0.16,
     interactive: false
   });
 
@@ -720,12 +728,20 @@ function renderGlidePolygons(lfCatchmentLatLons, uavRingLatLons) {
   }
 
   if (state.showUavRingLayer && uavRingLatLons && uavRingLatLons.length) {
+    if (!map.hasLayer(uavGlideRingHaloLayer)) {
+      uavGlideRingHaloLayer.addTo(map);
+    }
     if (!map.hasLayer(uavGlideRingLayer)) {
       uavGlideRingLayer.addTo(map);
     }
+    uavGlideRingHaloLayer.setLatLngs(uavRingLatLons);
     uavGlideRingLayer.setLatLngs(uavRingLatLons);
   } else {
+    uavGlideRingHaloLayer.setLatLngs([]);
     uavGlideRingLayer.setLatLngs([]);
+    if (map.hasLayer(uavGlideRingHaloLayer)) {
+      map.removeLayer(uavGlideRingHaloLayer);
+    }
     if (map.hasLayer(uavGlideRingLayer)) {
       map.removeLayer(uavGlideRingLayer);
     }
@@ -1021,13 +1037,29 @@ function setStatusClass(el, statusClass) {
 function updateAircraftSafetyHud(st) {
   if (!st) return;
 
+  const g = st.glide;
   const lfGroundEl = document.getElementById('readout-lf-ground');
   if (lfGroundEl) {
-    lfGroundEl.textContent = `שדה: ${st.glide.lfGroundFt.toLocaleString('en-US')} ft`;
+    lfGroundEl.textContent = `שדה: ${g.lfGroundFt.toLocaleString('en-US')} ft`;
   }
   const glideSummaryEl = document.getElementById('glide-chart-summary');
   if (glideSummaryEl) {
-    glideSummaryEl.textContent = `${st.glide.distToLfKm.toFixed(1)} km | ${(st.glide.totalMissionTimeMin || 0).toFixed(1)}/${st.glide.batteryTimeMin} min`;
+    glideSummaryEl.textContent = `${g.distToLfKm.toFixed(1)} km | גלישה: ${g.timeToLfMin.toFixed(1)}m + הנמכה: ${(g.postArrivalDescentMin || 0).toFixed(1)}m`;
+  }
+
+  // Update Resultant Post-Arrival Descent Time & Total Electrical Potential Readouts in Glide Tab
+  const postDescentEl = document.getElementById('readout-post-arrival-descent');
+  if (postDescentEl) {
+    const arrAboveLf = g.arrivalHeightAboveLfFt || 0;
+    const descMin = g.postArrivalDescentMin || 0;
+    postDescentEl.textContent = `${arrAboveLf.toLocaleString('en-US')} ft ⬅ ${descMin.toFixed(1)} min`;
+  }
+
+  const totalElecEl = document.getElementById('readout-total-electrical-time');
+  if (totalElecEl) {
+    const totMin = g.totalMissionTimeMin || 0;
+    totalElecEl.textContent = `${totMin.toFixed(1)} / ${g.batteryTimeMin.toFixed(1)} min`;
+    totalElecEl.style.color = g.hasElectricalPotential ? '#4ade80' : '#f87171';
   }
 
   // 1. Terrain Chip in Bottom HUD
@@ -1050,7 +1082,6 @@ function updateAircraftSafetyHud(st) {
   document.getElementById('hud-val-los').textContent = `${losSign}${st.heightAboveLosFt.toLocaleString('en-US')} ft`;
 
   // 3. Emergency Glide & Electrical Potential Chip in Bottom HUD
-  const g = st.glide;
   const glideClass = g.canGlideToLf ? 'status-ok' : 'status-danger';
   setStatusClass(document.getElementById('hud-chip-glide'), glideClass);
 
@@ -1165,6 +1196,19 @@ function renderDynamicWindTable() {
   });
 }
 
+function toggleWindSubmenu(forceOpen) {
+  state.windSubmenuOpen =
+    typeof forceOpen === 'boolean' ? forceOpen : !state.windSubmenuOpen;
+  const bodyEl = document.getElementById('wind-details-body');
+  const btnEl = document.getElementById('btn-toggle-wind-details');
+  const arrowEl = document.getElementById('wind-submenu-arrow');
+  if (bodyEl) bodyEl.classList.toggle('is-collapsed', !state.windSubmenuOpen);
+  if (btnEl) btnEl.setAttribute('aria-expanded', state.windSubmenuOpen ? 'true' : 'false');
+  if (arrowEl) {
+    arrowEl.textContent = state.windSubmenuOpen ? 'הסתר פירוט ▴' : 'הצג פירוט ▾';
+  }
+}
+
 function updateWindModeUI() {
   const isRealtime = state.windMode === 'realtime';
   const isForecast = state.windMode === 'forecast';
@@ -1177,6 +1221,11 @@ function updateWindModeUI() {
   document.getElementById('wind-forecast-controls').style.display = isForecast ? 'flex' : 'none';
   document.getElementById('wind-api-status-row').style.display = isManual ? 'none' : 'flex';
   document.getElementById('wind-manual-toolbar').style.display = isManual ? 'flex' : 'none';
+
+  // When switching to manual mode, automatically open the wind submenu so the user can edit
+  if (isManual && !state.windSubmenuOpen) {
+    toggleWindSubmenu(true);
+  }
 
   renderDynamicWindTable();
 
@@ -1586,13 +1635,6 @@ function bindUIEvents() {
     triggerGlideAndAircraftCompute();
   });
 
-  document.getElementById('input-post-descent-min').addEventListener('change', (e) => {
-    state.postArrivalDescentMin = Math.max(0, parseFloat(e.target.value) || 0);
-    e.target.value = state.postArrivalDescentMin;
-    saveGlideConfig();
-    triggerGlideAndAircraftCompute();
-  });
-
   document.getElementById('input-lf-safety-ft').addEventListener('change', (e) => {
     state.lfSafetyMarginFt = Math.max(0, parseFloat(e.target.value) || 0);
     e.target.value = state.lfSafetyMarginFt;
@@ -1605,6 +1647,11 @@ function bindUIEvents() {
     e.target.value = state.ridgeClearanceFt;
     saveGlideConfig();
     triggerGlideAndAircraftCompute();
+  });
+
+  // Collapsible Wind Details Submenu Toggle (Closed by default)
+  document.getElementById('btn-toggle-wind-details').addEventListener('click', () => {
+    toggleWindSubmenu();
   });
 
   // Wind Mode Switcher (Real-Time vs Forecast Time vs Manual)
@@ -1678,7 +1725,6 @@ function bootstrap() {
   document.getElementById('input-glide-speed-kts').value = state.glideSpeedKts;
   document.getElementById('input-glide-rod-fpm').value = state.glideRodFpm;
   document.getElementById('input-battery-min').value = state.batteryTimeMin;
-  document.getElementById('input-post-descent-min').value = state.postArrivalDescentMin;
   document.getElementById('input-lf-safety-ft').value = state.lfSafetyMarginFt;
   document.getElementById('input-ridge-clear-ft').value = state.ridgeClearanceFt;
 
