@@ -88,10 +88,10 @@ const state = {
   glideSpeedKts: 60, // Single glide IAS speed (knots)
   glideRodFpm: 500,  // Single glide Rate of Descent (ft/min)
   batteryTimeMin: 25,
-  postArrivalDescentMin: 5, // Post-arrival descent time at field for electrical potential
   lfSafetyMarginFt: 500,
   ridgeClearanceFt: 200,
   windMode: 'realtime', // 'realtime' | 'forecast' | 'manual'
+  windSubmenuOpen: false, // Closed by default
   forecastDatetimeIso: '',
   windLayers: [...DEFAULT_WIND_LAYERS],
 
@@ -121,6 +121,7 @@ let losInspectShadowLayer = null;
 
 let lfGlideHaloLayer = null;
 let lfGlidePolygonLayer = null;
+let uavGlideRingHaloLayer = null;
 let uavGlideRingLayer = null;
 let directGlideLineLayer = null;
 let criticalRidgeMarker = null;
