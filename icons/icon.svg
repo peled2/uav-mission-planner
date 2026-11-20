@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="#0b1118" stroke="#0ea5e9" stroke-width="10"/>
+  <!-- Radar arcs -->
+  <path d="M 140 310 A 140 140 0 0 1 372 310" fill="none" stroke="#1e3a52" stroke-width="6" stroke-dasharray="10 8"/>
+  <path d="M 95 310 A 195 195 0 0 1 417 310" fill="none" stroke="#1e3a52" stroke-width="6" stroke-dasharray="10 8"/>
+  <!-- Terrain silhouette -->
+  <polygon points="175,380 232,272 268,308 302,248 355,380" fill="#162a3a" stroke="#38bdf8" stroke-width="5"/>
+  <!-- Curved Earth horizon -->
+  <path d="M 70 405 Q 256 345 442 405" fill="none" stroke="#10b981" stroke-width="14" stroke-linecap="round"/>
+  <!-- LOS Ray -->
+  <line x1="114" y1="246" x2="392" y2="142" stroke="#10b981" stroke-width="12" stroke-dasharray="18 10" stroke-linecap="round"/>
+  <!-- GCS Antenna Tower -->
+  <line x1="114" y1="246" x2="114" y2="375" stroke="#e2e8f0" stroke-width="12" stroke-linecap="round"/>
+  <line x1="114" y1="330" x2="92" y2="380" stroke="#e2e8f0" stroke-width="10" stroke-linecap="round"/>
+  <line x1="114" y1="330" x2="136" y2="380" stroke="#e2e8f0" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="114" cy="244" r="18" fill="#0ea5e9"/>
+  <!-- UAV -->
+  <polygon points="434,126 382,88 374,132 346,122 356,148 382,152 406,188" fill="#38bdf8"/>
+</svg>

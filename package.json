@@ -1,0 +1,23 @@
+{
+  "name": "uav-mission-planner",
+  "version": "1.0.0",
+  "description": "Unified UAV Mission Planning PWA combining 360° LOS Viewshed (with safety altitude margin), Terrain Obstacle & Safety Buffer visualization, and Terrain-Aware Emergency Glide Envelope.",
+  "type": "module",
+  "scripts": {
+    "dev": "python3 -m http.server 8090",
+    "start": "python3 -m http.server 8090",
+    "build": "echo 'Static PWA ready for deployment'"
+  },
+  "keywords": [
+    "uav",
+    "rpas",
+    "mission-planner",
+    "los",
+    "viewshed",
+    "terrain-safety",
+    "glide-calculator",
+    "pwa",
+    "netlify"
+  ],
+  "license": "MIT"
+}
