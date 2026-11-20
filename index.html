@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>תכנון משימה כטב״מ | UAV Unified Mission Planner</title>
-  <meta name="description" content="אפליקציית תכנון משימה אחידה לכטב״מ: טווח תקשורת כפול (LOS + מרווח בטיחות), מכשולי קרקע ורצועת בטיחות, ופוטנציאל גלישה בחירום מתחשב קרקע." />
+  <meta name="description" content="אפליקציית תכנון משימה אחידה לכטב״מ: טווח תקשורת כפול (LOS + מרווח בטיחות), מכשולי קרקע ורצועת בטיחות, ופוטנציאל גלישה בחירום מתחשב קרקע ורוחות בזמן אמת." />
   <meta name="theme-color" content="#0b1118" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -19,27 +19,27 @@
   <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="/css/styles.css?v=1.0" />
+  <link rel="stylesheet" href="/css/styles.css?v=1.2" />
 </head>
 <body>
   <main id="app-shell">
     <!-- 100% Full-Viewport Mission Map -->
     <div id="map" role="application" aria-label="מפת תכנון משימה מאוחדת"></div>
 
-    <!-- Top-Left Map Quick Placement & Layer Visibility Toolbar -->
-    <div id="map-quick-toolbar" class="map-quick-toolbar" aria-label="כלי הצבה ושכבות מפה">
-      <div class="toolbar-group" role="radiogroup" aria-label="מצב הצבה בלחיצה על המפה">
-        <button type="button" id="btn-mode-nav" class="tool-pill active" title="מצב ניווט רגיל במפה (גרירת סמנים עדיין פעילה)">
-          🔒 ניווט
+    <!-- Top-Left Map Controls: Move/Lock Entity Buttons + Layer Toggles -->
+    <div id="map-quick-toolbar" class="map-quick-toolbar" aria-label="כלי הזזה ושכבות מפה">
+      <div class="toolbar-group" role="group" aria-label="הזזה ונעילה של ישויות על המפה">
+        <button type="button" id="btn-move-station" class="tool-pill" title="הפעל/נעל הזזת תחנת תקשורת על המפה">
+          <span class="lock-state">🔒</span>
+          <span>הזז תחנה</span>
         </button>
-        <button type="button" id="btn-mode-uav" class="tool-pill" title="לחיצה על המפה תציב את המטוס">
-          ✈️ הצב מטוס
+        <button type="button" id="btn-move-lf" class="tool-pill" title="הפעל/נעל הזזת שדה נחיתה על המפה">
+          <span class="lock-state">🔒</span>
+          <span>הזז שדה</span>
         </button>
-        <button type="button" id="btn-mode-station" class="tool-pill" title="לחיצה על המפה תציב את תחנת התקשורת">
-          📡 הצב תחנה
-        </button>
-        <button type="button" id="btn-mode-lf" class="tool-pill" title="לחיצה על המפה תציב את שדה הנחיתה">
-          🛬 הצב שדה
+        <button type="button" id="btn-move-uav" class="tool-pill" title="הפעל/נעל הזזת מטוס על המפה">
+          <span class="lock-state">🔒</span>
+          <span>הזז מטוס</span>
         </button>
       </div>
 
@@ -59,30 +59,40 @@
       </div>
     </div>
 
-    <!-- Bottom-Left Always-Visible Aircraft Safety Summary HUD & Hover Probe -->
-    <div id="aircraft-hud-bar" class="aircraft-hud-bar" aria-label="חיווי בטיחות מטוס בזמן אמת">
-      <div id="hud-overall-badge" class="hud-overall-badge status-ok" title="סטטוס בטיחות משולב במיקום המטוס">
-        ✓ בטוח לטיסה
-      </div>
-      <button type="button" id="hud-chip-terrain" class="hud-chip status-ok" title="לחץ למעבר ללשונית קרקע">
-        <span class="chip-label">⛰️ מעל הקרקע:</span>
-        <bdi id="hud-val-terrain" class="chip-val" dir="ltr">-- ft AGL</bdi>
-      </button>
-      <button type="button" id="hud-chip-los" class="hud-chip status-ok" title="לחץ למעבר ללשונית תקשורת">
-        <span class="chip-label">📡 מעל תקשורת:</span>
-        <bdi id="hud-val-los" class="chip-val" dir="ltr">-- ft</bdi>
-      </button>
-      <button type="button" id="hud-chip-glide" class="hud-chip status-ok" title="לחץ למעבר ללשונית גלישה">
-        <span class="chip-label">🛬 גלישה לשדה:</span>
-        <bdi id="hud-val-glide" class="chip-val" dir="ltr">--</bdi>
-      </button>
-      <div id="hud-cursor-probe" class="hud-cursor-probe" title="גובה קרקע במיקום הסמן">
-        <span>סמן:</span>
-        <bdi id="hud-val-probe" dir="ltr">-- ft</bdi>
-      </div>
-    </div>
+    <!-- Bottom Compact Collapsible Aircraft Status HUD (Never overflows screen!) -->
+    <section id="aircraft-hud-bar" class="aircraft-hud-bar" aria-label="חיווי בטיחות מטוס בזמן אמת">
+      <header class="hud-top-row">
+        <div class="hud-top-right">
+          <div id="hud-overall-badge" class="hud-overall-badge status-ok">
+            ✓ בטוח לטיסה
+          </div>
+          <div id="hud-cursor-probe" class="hud-cursor-probe" title="גובה קרקע במיקום הסמן">
+            <span>קרקע בסמן:</span>
+            <bdi id="hud-val-probe" dir="ltr">-- ft</bdi>
+          </div>
+        </div>
+        <button type="button" id="btn-toggle-hud" class="hud-toggle-btn" title="הצג או הסתר נתוני מטוס">
+          הסתר ▾
+        </button>
+      </header>
 
-    <!-- Right-Side Collapsible Categorized Mission Sidebar -->
+      <div id="hud-metrics-grid" class="hud-metrics-grid">
+        <button type="button" id="hud-chip-terrain" class="hud-chip status-ok" title="לחץ למעבר ללשונית קרקע">
+          <span class="chip-label">⛰️ מעל הקרקע</span>
+          <bdi id="hud-val-terrain" class="chip-val" dir="ltr">-- ft AGL</bdi>
+        </button>
+        <button type="button" id="hud-chip-los" class="hud-chip status-ok" title="לחץ למעבר ללשונית תקשורת">
+          <span class="chip-label">📡 מעל תקשורת</span>
+          <bdi id="hud-val-los" class="chip-val" dir="ltr">-- ft</bdi>
+        </button>
+        <button type="button" id="hud-chip-glide" class="hud-chip status-ok" title="לחץ למעבר ללשונית גלישה">
+          <span class="chip-label">🛬 גלישה וחשמל</span>
+          <bdi id="hud-val-glide" class="chip-val" dir="ltr">--</bdi>
+        </button>
+      </div>
+    </section>
+
+    <!-- Right-Side Collapsible Categorized Mission Sidebar (3 Categories: תקשורת / קרקע / גלישה) -->
     <aside id="mission-sidebar" class="mission-sidebar" aria-label="תפריט תכנון משימה">
       <!-- Sidebar Header -->
       <header id="sidebar-header" class="sidebar-header">
@@ -131,12 +141,9 @@
           </div>
         </section>
 
-        <!-- Category Navigation Tabs -->
+        <!-- Category Navigation Tabs (3 Tabs Only: תקשורת / קרקע / גלישה) -->
         <nav class="category-tabs" role="tablist" aria-label="קטגוריות תכנון משימה">
-          <button type="button" id="tab-btn-aircraft" class="cat-tab active" role="tab" aria-selected="true" data-tab="aircraft">
-            ✈️ מטוס
-          </button>
-          <button type="button" id="tab-btn-los" class="cat-tab" role="tab" aria-selected="false" data-tab="los">
+          <button type="button" id="tab-btn-los" class="cat-tab active" role="tab" aria-selected="true" data-tab="los">
             📡 תקשורת
           </button>
           <button type="button" id="tab-btn-terrain" class="cat-tab" role="tab" aria-selected="false" data-tab="terrain">
@@ -150,157 +157,9 @@
         <!-- Scrollable Category Panels -->
         <div class="category-panels">
           <!-- ================================================================
-               TAB 1: AIRCRAFT LOCATION & COMBINED SAFETY TELEMETRY
+               TAB 1: COMMUNICATION (LOS) & SAFETY MARGIN
                ================================================================ -->
-          <section id="panel-aircraft" class="cat-panel active" role="tabpanel" aria-labelledby="tab-btn-aircraft">
-            <!-- Aircraft Position UTM WGS84 -->
-            <div class="control-block">
-              <div class="block-header">
-                <span class="block-label">מיקום מטוס (UTM WGS84)</span>
-                <button type="button" id="btn-place-uav-inline" class="action-mini-btn">
-                  ✈️ הצב בלחיצה על המפה
-                </button>
-              </div>
-              <div class="utm-grid" dir="ltr">
-                <div class="utm-field">
-                  <label for="input-uav-zone">Zone</label>
-                  <input type="text" id="input-uav-zone" value="36N" maxlength="3" />
-                </div>
-                <div class="utm-field">
-                  <label for="input-uav-e">E</label>
-                  <input type="number" id="input-uav-e" step="10" value="668500" />
-                </div>
-                <div class="utm-field">
-                  <label for="input-uav-n">N</label>
-                  <input type="number" id="input-uav-n" step="10" value="3538200" />
-                </div>
-              </div>
-              <div class="toggle-row">
-                <label class="switch-label" for="chk-uav-glide-ring">
-                  <input type="checkbox" id="chk-uav-glide-ring" />
-                  <span>הצג "טבעת מטוס" (טווח גלישה 360° ממיקום המטוס)</span>
-                </label>
-              </div>
-            </div>
-
-            <!-- Combined Safety Telemetry Cards for Aircraft Point -->
-            <div id="uav-overall-banner" class="safety-banner status-ok">
-              <div class="banner-title" id="uav-banner-title">✓ המטוס באזור טיסה בטוח</div>
-              <div class="banner-sub" id="uav-banner-sub">עומד בדרישות גובה קרקע, מרווח תקשורת ופוטנציאל גלישה</div>
-            </div>
-
-            <!-- 1. Terrain Clearance Card -->
-            <div id="card-status-terrain" class="telemetry-card status-ok">
-              <div class="t-card-header">
-                <span class="t-card-title">⛰️ גובה מעל הקרקע ומרווח מכשולים</span>
-                <span id="badge-status-terrain" class="t-badge">בטוח</span>
-              </div>
-              <div class="t-grid">
-                <div class="t-metric">
-                  <span class="t-label">גובה מטוס מעל הקרקע (AGL)</span>
-                  <bdi id="val-uav-agl" class="t-big" dir="ltr">-- ft</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">גובה קרקע בנקודה</span>
-                  <bdi id="val-uav-ground" class="t-big" dir="ltr">-- ft ASL</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">מרווח מעל גובה בטיחות קרקע</span>
-                  <bdi id="val-terrain-v-margin" class="t-val" dir="ltr">-- ft</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">מרחק אופקי ממכשול קרקע</span>
-                  <bdi id="val-terrain-h-dist" class="t-val" dir="ltr">--</bdi>
-                </div>
-              </div>
-            </div>
-
-            <!-- 2. Communication Coverage Card -->
-            <div id="card-status-los" class="telemetry-card status-ok">
-              <div class="t-card-header">
-                <span class="t-card-title">📡 כיסוי תקשורת בנקודת המטוס</span>
-                <span id="badge-status-los" class="t-badge">בטוח</span>
-              </div>
-              <div class="t-grid">
-                <div class="t-metric">
-                  <span class="t-label">גובה מעל כיסוי התקשורת</span>
-                  <bdi id="val-uav-above-los" class="t-big" dir="ltr">-- ft</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">גובה מינימלי לתקשורת</span>
-                  <bdi id="val-uav-min-los" class="t-big" dir="ltr">-- ft ASL</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">מרווח מעל גובה בטיחות תקשורת</span>
-                  <bdi id="val-los-safety-diff" class="t-val" dir="ltr">-- ft</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">מרחק ואזימוט מהתחנה</span>
-                  <bdi id="val-uav-station-vec" class="t-val" dir="ltr">-- km | --°</bdi>
-                </div>
-              </div>
-            </div>
-
-            <!-- 3. Emergency Glide Feasibility Card -->
-            <div id="card-status-glide" class="telemetry-card status-ok">
-              <div class="t-card-header">
-                <span class="t-card-title">🛬 פוטנציאל גלישה לשדה הנחיתה</span>
-                <span id="badge-status-glide" class="t-badge">בטווח גלישה</span>
-              </div>
-              <div class="t-grid">
-                <div class="t-metric">
-                  <span class="t-label">מרחק לשדה מול טווח מירבי</span>
-                  <bdi id="val-glide-dist-compare" class="t-big" dir="ltr">-- / -- km</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">יתרת גובה בהגעה מעל הבטיחות</span>
-                  <bdi id="val-glide-arrival-margin" class="t-big" dir="ltr">-- ft</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">מהירות וזמן גלישה לשדה</span>
-                  <bdi id="val-glide-speed-time" class="t-val" dir="ltr">-- kts | -- min</bdi>
-                </div>
-                <div class="t-metric">
-                  <span class="t-label">מרווח מינימלי מרכס בדרך</span>
-                  <bdi id="val-glide-ridge-margin" class="t-val" dir="ltr">-- ft</bdi>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <!-- ================================================================
-               TAB 2: COMMUNICATION (LOS) & SAFETY MARGIN
-               ================================================================ -->
-          <section id="panel-los" class="cat-panel" role="tabpanel" aria-labelledby="tab-btn-los">
-            <!-- Ground Station UTM WGS84 -->
-            <div class="control-block">
-              <div class="block-header">
-                <span class="block-label">מיקום תחנת תקשורת (UTM WGS84)</span>
-                <div class="header-actions">
-                  <button type="button" id="btn-gps-station" class="action-mini-btn" title="קבל מיקום GPS">📍 GPS</button>
-                  <button type="button" id="btn-place-station-inline" class="action-mini-btn">📡 הצב במפה</button>
-                </div>
-              </div>
-              <div class="utm-grid" dir="ltr">
-                <div class="utm-field">
-                  <label for="input-station-zone">Zone</label>
-                  <input type="text" id="input-station-zone" value="36N" maxlength="3" />
-                </div>
-                <div class="utm-field">
-                  <label for="input-station-e">E</label>
-                  <input type="number" id="input-station-e" step="10" value="659843" />
-                </div>
-                <div class="utm-field">
-                  <label for="input-station-n">N</label>
-                  <input type="number" id="input-station-n" step="10" value="3530421" />
-                </div>
-              </div>
-              <div class="sub-readout">
-                <span>גובה קרקע בתחנה:</span>
-                <bdi id="readout-station-ground" class="mono-val" dir="ltr">105 ft ASL</bdi>
-              </div>
-            </div>
-
+          <section id="panel-los" class="cat-panel active" role="tabpanel" aria-labelledby="tab-btn-los">
             <!-- Safety Altitude Above LOS Loss -->
             <div class="control-block highlight-block-sky">
               <div class="block-header">
@@ -320,7 +179,7 @@
               </div>
             </div>
 
-            <!-- Antenna Height AGL -->
+            <!-- Antenna Height AGL & Station Ground Elevation Readout -->
             <div class="control-block">
               <div class="block-header">
                 <label for="input-h-ant" class="block-label">גובה אנטנה מעל הקרקע</label>
@@ -332,6 +191,10 @@
                   <input type="number" id="input-h-ant" min="0" max="500" step="1" value="15" />
                   <span>m</span>
                 </div>
+              </div>
+              <div class="sub-readout">
+                <span>גובה קרקע בתחנה:</span>
+                <bdi id="readout-station-ground" class="mono-val" dir="ltr">105 ft ASL</bdi>
               </div>
             </div>
 
@@ -381,7 +244,7 @@
           </section>
 
           <!-- ================================================================
-               TAB 3: TERRAIN OBSTACLES & SAFETY BUFFER
+               TAB 2: TERRAIN OBSTACLES & SAFETY BUFFER
                ================================================================ -->
           <section id="panel-terrain" class="cat-panel" role="tabpanel" aria-labelledby="tab-btn-terrain">
             <!-- Vertical Safety Clearance from Terrain -->
@@ -449,44 +312,49 @@
           </section>
 
           <!-- ================================================================
-               TAB 4: TERRAIN-AWARE EMERGENCY GLIDE
+               TAB 3: TERRAIN-AWARE EMERGENCY GLIDE & REAL-TIME / FORECAST WINDS
                ================================================================ -->
           <section id="panel-glide" class="cat-panel" role="tabpanel" aria-labelledby="tab-btn-glide">
-            <!-- Landing Field Location UTM WGS84 -->
-            <div class="control-block">
-              <div class="block-header">
-                <span class="block-label">מיקום שדה נחיתה (UTM WGS84)</span>
-                <div class="header-actions">
-                  <button type="button" id="btn-copy-station-to-lf" class="action-mini-btn" title="העתק קואורדינטות מתחנת התקשורת">📋 מתחנה</button>
-                  <button type="button" id="btn-place-lf-inline" class="action-mini-btn">🛬 הצב במפה</button>
-                </div>
-              </div>
-              <div class="utm-grid" dir="ltr">
-                <div class="utm-field">
-                  <label for="input-lf-zone">Zone</label>
-                  <input type="text" id="input-lf-zone" value="36N" maxlength="3" />
-                </div>
-                <div class="utm-field">
-                  <label for="input-lf-e">E</label>
-                  <input type="number" id="input-lf-e" step="10" value="662100" />
-                </div>
-                <div class="utm-field">
-                  <label for="input-lf-n">N</label>
-                  <input type="number" id="input-lf-n" step="10" value="3532900" />
-                </div>
-              </div>
-              <div class="sub-readout">
-                <span>גובה קרקע בשדה הנחיתה (אוטומטי מ-DEM):</span>
-                <bdi id="readout-lf-ground" class="mono-val" dir="ltr">-- ft ASL</bdi>
-              </div>
-            </div>
-
-            <!-- Landing Field Safety Margin, Ridge Crossing Clearance & Battery Time -->
+            <!-- Unified Flight Performance, Safety Clearances & Electrical Potential Inputs -->
             <div class="control-block highlight-block-violet">
               <div class="block-header">
-                <span class="block-label">מרווחי בטיחות גלישה וזמן סוללה</span>
+                <span class="block-label">נתוני גלישה, מרווחי בטיחות ופוטנציאל חשמלי</span>
+                <bdi id="readout-lf-ground" class="unit-pill" dir="ltr">שדה: -- ft</bdi>
               </div>
-              <div class="three-col-inputs">
+
+              <div class="glide-params-grid">
+                <div class="mini-input-card">
+                  <label for="input-glide-speed-kts">מהירות גלישה (IAS)</label>
+                  <div class="num-box-with-unit full-w" dir="ltr">
+                    <input type="number" id="input-glide-speed-kts" min="10" max="250" step="1" value="60" />
+                    <span>kts</span>
+                  </div>
+                </div>
+
+                <div class="mini-input-card">
+                  <label for="input-glide-rod-fpm">קצב הנמכה (RoD)</label>
+                  <div class="num-box-with-unit full-w" dir="ltr">
+                    <input type="number" id="input-glide-rod-fpm" min="50" max="5000" step="25" value="500" />
+                    <span>ft/m</span>
+                  </div>
+                </div>
+
+                <div class="mini-input-card">
+                  <label for="input-battery-min">זמן סוללה כולל</label>
+                  <div class="num-box-with-unit full-w" dir="ltr">
+                    <input type="number" id="input-battery-min" min="1" max="180" step="1" value="25" />
+                    <span>min</span>
+                  </div>
+                </div>
+
+                <div class="mini-input-card">
+                  <label for="input-post-descent-min">זמן הנמכה מעל השדה</label>
+                  <div class="num-box-with-unit full-w" dir="ltr">
+                    <input type="number" id="input-post-descent-min" min="0" max="120" step="1" value="5" />
+                    <span>min</span>
+                  </div>
+                </div>
+
                 <div class="mini-input-card">
                   <label for="input-lf-safety-ft">בטיחות מעל השדה</label>
                   <div class="num-box-with-unit full-w" dir="ltr">
@@ -494,6 +362,7 @@
                     <span>ft</span>
                   </div>
                 </div>
+
                 <div class="mini-input-card">
                   <label for="input-ridge-clear-ft">חציית קרקע בדרך</label>
                   <div class="num-box-with-unit full-w" dir="ltr">
@@ -501,14 +370,53 @@
                     <span>ft</span>
                   </div>
                 </div>
-                <div class="mini-input-card">
-                  <label for="input-battery-min">זמן סוללה בחירום</label>
-                  <div class="num-box-with-unit full-w" dir="ltr">
-                    <input type="number" id="input-battery-min" min="1" max="180" step="1" value="20" />
-                    <span>min</span>
-                  </div>
+              </div>
+
+              <div class="sub-readout">
+                <span>זמן גלישה מירבי לשדה (סוללה פחות הנמכה):</span>
+                <bdi id="readout-effective-glide-min" class="mono-val" dir="ltr">20.0 min</bdi>
+              </div>
+            </div>
+
+            <!-- Wind Profile Section: Real-Time / Forecast by Time vs Manual Input (per 1,000 ft) -->
+            <div class="control-block">
+              <div class="block-header">
+                <span class="block-label">רוחות לפי גובה (כל 1,000 רגל)</span>
+                <div class="mini-seg" role="radiogroup" aria-label="מקור נתוני רוח">
+                  <button type="button" id="btn-wind-realtime" class="mini-seg-btn active">זמן אמת</button>
+                  <button type="button" id="btn-wind-forecast" class="mini-seg-btn">תחזית לזמן</button>
+                  <button type="button" id="btn-wind-manual" class="mini-seg-btn">הזנה ידנית</button>
                 </div>
               </div>
+
+              <!-- Forecast Date/Time Picker Row (shown when 'forecast' mode is active) -->
+              <div id="wind-forecast-controls" class="wind-forecast-controls" style="display: none;">
+                <input type="datetime-local" id="input-wind-datetime" class="wind-datetime-input" dir="ltr" />
+                <button type="button" id="btn-fetch-forecast-wind" class="action-mini-btn">🔄 משוך תחזית</button>
+              </div>
+
+              <!-- Real-time / Forecast Status Bar -->
+              <div id="wind-api-status-row" class="sub-readout">
+                <span id="wind-status-label">נתוני רוח למיקום המטוס:</span>
+                <div class="header-actions">
+                  <bdi id="wind-status-val" class="mono-val" dir="ltr">טוען...</bdi>
+                  <button type="button" id="btn-refresh-wind" class="action-mini-btn" title="רענן נתוני רוח מהאינטרנט">🔄</button>
+                </div>
+              </div>
+
+              <!-- Manual Add Row Button (shown when 'manual' mode is active) -->
+              <div id="wind-manual-toolbar" class="block-header" style="display: none;">
+                <span class="helper-note">ניתן לערוך או להוסיף שכבות רוח ידנית:</span>
+                <button type="button" id="btn-add-wind-row" class="action-mini-btn">+ הוסף שכבה</button>
+              </div>
+
+              <div class="table-head-row wind-head" dir="ltr">
+                <span>Alt (1,000 ft)</span>
+                <span>Speed (kts)</span>
+                <span>From (°)</span>
+                <span></span>
+              </div>
+              <div id="wind-rows-container" class="dynamic-rows"></div>
             </div>
 
             <!-- Embedded Direct Glide Trajectory Cross-Section Chart -->
@@ -521,35 +429,6 @@
                 <canvas id="glide-chart-canvas"></canvas>
               </div>
             </div>
-
-            <!-- Aircraft Polar: Speed (IAS) vs Rate of Descent (RoD) -->
-            <div class="control-block">
-              <div class="block-header">
-                <span class="block-label">ביצועי מטוס: מהירות (IAS) מול שקיעה (RoD)</span>
-                <button type="button" id="btn-add-polar-row" class="action-mini-btn">+ הוסף זוג</button>
-              </div>
-              <div class="table-head-row" dir="ltr">
-                <span>IAS (knots)</span>
-                <span>RoD (ft/min)</span>
-                <span></span>
-              </div>
-              <div id="polar-rows-container" class="dynamic-rows"></div>
-            </div>
-
-            <!-- Wind Layers by Altitude (per 1,000 ft) -->
-            <div class="control-block">
-              <div class="block-header">
-                <span class="block-label">שכבות רוח לפי גובה (1,000 רגל)</span>
-                <button type="button" id="btn-add-wind-row" class="action-mini-btn">+ הוסף שכבה</button>
-              </div>
-              <div class="table-head-row wind-head" dir="ltr">
-                <span>Alt (kft)</span>
-                <span>Speed (kts)</span>
-                <span>From (°)</span>
-                <span></span>
-              </div>
-              <div id="wind-rows-container" class="dynamic-rows"></div>
-            </div>
           </section>
         </div>
       </div>
@@ -559,6 +438,6 @@
   <canvas id="decode-fallback-canvas" width="256" height="256" style="display: none;"></canvas>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script type="module" src="/js/app.js?v=1.0"></script>
+  <script type="module" src="/js/app.js?v=1.2"></script>
 </body>
 </html>

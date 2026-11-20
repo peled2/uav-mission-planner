@@ -5,7 +5,9 @@
  * 1. Dual 360° LOS Viewshed (Max range at H_UAV + Safety envelope at H_UAV - H_LOS_Safety)
  * 2. Terrain Obstacle Contour (H_UAV - H_Terrain_Safety) & Horizontal Safety Buffer (2D EDT)
  * 3. Terrain-Aware Emergency Glide Catchment Envelope around Landing Field
- * 4. Aircraft Position Simulator ("נקודת מטוס" + "טבעת מטוס") & Real-Time Safety Telemetry
+ *    - Real-Time / Forecast Wind Profile per 1,000 ft (from Open-Meteo pressure levels) OR Manual Entry
+ *    - Single IAS / RoD input + Post-Arrival Descent Time electrical potential check
+ * 4. On-Map Move/Lock Entity Controls (Station, Landing Field, Aircraft) + Compact Collapsible Bottom HUD
  */
 
 import {
@@ -14,32 +16,35 @@ import {
   initialBearingDeg,
   destinationPoint,
   haversineDistanceKm,
-  latLonToUtm,
-  utmToLatLon,
   selectDemZoomTier,
   buildComputationEnvelope,
   expandBBoxByMeters,
   isViewportInsideBounds
 } from './mission-math.js';
 import { LosChartRenderer, GlideChartRenderer } from './chart-renderer.js';
+import { fetchWindLayersPer1000Ft } from './wind-service.js';
 
-const STORAGE_KEY_GLIDE_CONFIG = 'uav_mission_planner_glide_v1';
-
-const DEFAULT_SPEED_ROD_PAIRS = [
-  { speed: 52, rod: 400 },
-  { speed: 75, rod: 1200 }
-];
+const STORAGE_KEY_GLIDE_CONFIG = 'uav_mission_planner_glide_v2';
 
 const DEFAULT_WIND_LAYERS = [
   { altitudeKft: 0, speed: 5, direction: 270 },
-  { altitudeKft: 5, speed: 12, direction: 280 },
-  { altitudeKft: 10, speed: 18, direction: 290 }
+  { altitudeKft: 1, speed: 7, direction: 272 },
+  { altitudeKft: 2, speed: 9, direction: 275 },
+  { altitudeKft: 3, speed: 11, direction: 278 },
+  { altitudeKft: 4, speed: 12, direction: 280 },
+  { altitudeKft: 5, speed: 14, direction: 282 },
+  { altitudeKft: 6, speed: 15, direction: 285 },
+  { altitudeKft: 7, speed: 17, direction: 287 },
+  { altitudeKft: 8, speed: 18, direction: 290 },
+  { altitudeKft: 9, speed: 20, direction: 292 },
+  { altitudeKft: 10, speed: 22, direction: 295 }
 ];
 
 const state = {
   mapType: 'topo', // 'topo' | 'ortho'
   sidebarCollapsed: false,
-  activeTab: 'aircraft', // 'aircraft' | 'los' | 'terrain' | 'glide'
+  hudCollapsed: false,
+  activeTab: 'los', // 'los' | 'terrain' | 'glide'
   placementMode: 'nav', // 'nav' | 'uav' | 'station' | 'lf'
 
   // Layer Visibility
@@ -61,7 +66,7 @@ const state = {
   lon0: 34.691,
   stationGroundM: 32,
   hAntM: 15,
-  losSafetyMarginFt: 2000, // e.g., H_UAV = 6,000 ft -> Safety envelope at 4,000 ft
+  losSafetyMarginFt: 2000,
   rMaxKm: 150,
   curvatureMode: 'rf', // 'rf' (4/3) | 'opt' (1.0)
   kFactor: 4 / 3,
@@ -70,20 +75,24 @@ const state = {
   raySummaries: [],
 
   // 3. Terrain Obstacles & Safety Buffer
-  terrainVerticalClearanceFt: 1000, // Threshold = H_UAV - 1,000 ft
+  terrainVerticalClearanceFt: 1000,
   terrainHorizontalSafetyM: 500,
   isTerrainAreaLocked: false,
   terrainEnvelope: null,
   terrainReqId: 0,
 
-  // 4. Emergency Glide & Landing Field (Default: Separate Runway East of Station)
+  // 4. Emergency Glide, Electrical Potential & Wind Source
   latLf: 31.915,
   lonLf: 34.785,
   lfGroundFt: 210,
-  lfSafetyMarginFt: 500, // Minimum arrival altitude above landing field
-  ridgeClearanceFt: 200, // Minimum terrain clearance along emergency glide path
-  batteryTimeMin: 20,
-  speedRoDPairs: [...DEFAULT_SPEED_ROD_PAIRS],
+  glideSpeedKts: 60, // Single glide IAS speed (knots)
+  glideRodFpm: 500,  // Single glide Rate of Descent (ft/min)
+  batteryTimeMin: 25,
+  postArrivalDescentMin: 5, // Post-arrival descent time at field for electrical potential
+  lfSafetyMarginFt: 500,
+  ridgeClearanceFt: 200,
+  windMode: 'realtime', // 'realtime' | 'forecast' | 'manual'
+  forecastDatetimeIso: '',
   windLayers: [...DEFAULT_WIND_LAYERS],
 
   // Latest Evaluated Aircraft Status
@@ -116,7 +125,7 @@ let uavGlideRingLayer = null;
 let directGlideLineLayer = null;
 let criticalRidgeMarker = null;
 
-// Entity Markers
+// Entity Markers (Locked by default unless their Move button on the map is active!)
 let stationMarker = null;
 let lfMarker = null;
 let uavMarker = null;
@@ -128,29 +137,39 @@ let glideChart = null;
 
 let terrainDebounceTimer = null;
 let glideDebounceTimer = null;
+let windFetchDebounceTimer = null;
 
 /**
- * Load saved Aircraft Polar (IAS/RoD) & Wind Layers from localStorage
+ * Load saved Glide & Wind configuration from localStorage
  */
 function loadSavedGlideConfig() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_GLIDE_CONFIG);
     if (!raw) return;
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed.speedRoDPairs) && parsed.speedRoDPairs.length >= 2) {
-      state.speedRoDPairs = parsed.speedRoDPairs;
+    if (Number.isFinite(parsed.glideSpeedKts) && parsed.glideSpeedKts > 0) {
+      state.glideSpeedKts = parsed.glideSpeedKts;
     }
-    if (Array.isArray(parsed.windLayers) && parsed.windLayers.length >= 1) {
-      state.windLayers = parsed.windLayers;
-    }
-    if (Number.isFinite(parsed.lfSafetyMarginFt)) {
-      state.lfSafetyMarginFt = parsed.lfSafetyMarginFt;
-    }
-    if (Number.isFinite(parsed.ridgeClearanceFt)) {
-      state.ridgeClearanceFt = parsed.ridgeClearanceFt;
+    if (Number.isFinite(parsed.glideRodFpm) && parsed.glideRodFpm > 0) {
+      state.glideRodFpm = parsed.glideRodFpm;
     }
     if (Number.isFinite(parsed.batteryTimeMin) && parsed.batteryTimeMin > 0) {
       state.batteryTimeMin = parsed.batteryTimeMin;
+    }
+    if (Number.isFinite(parsed.postArrivalDescentMin) && parsed.postArrivalDescentMin >= 0) {
+      state.postArrivalDescentMin = parsed.postArrivalDescentMin;
+    }
+    if (Number.isFinite(parsed.lfSafetyMarginFt) && parsed.lfSafetyMarginFt >= 0) {
+      state.lfSafetyMarginFt = parsed.lfSafetyMarginFt;
+    }
+    if (Number.isFinite(parsed.ridgeClearanceFt) && parsed.ridgeClearanceFt >= 0) {
+      state.ridgeClearanceFt = parsed.ridgeClearanceFt;
+    }
+    if (parsed.windMode === 'realtime' || parsed.windMode === 'forecast' || parsed.windMode === 'manual') {
+      state.windMode = parsed.windMode;
+    }
+    if (Array.isArray(parsed.windLayers) && parsed.windLayers.length >= 1) {
+      state.windLayers = parsed.windLayers;
     }
   } catch (e) {
     // Use defaults
@@ -162,11 +181,14 @@ function saveGlideConfig() {
     localStorage.setItem(
       STORAGE_KEY_GLIDE_CONFIG,
       JSON.stringify({
-        speedRoDPairs: state.speedRoDPairs,
-        windLayers: state.windLayers,
+        glideSpeedKts: state.glideSpeedKts,
+        glideRodFpm: state.glideRodFpm,
+        batteryTimeMin: state.batteryTimeMin,
+        postArrivalDescentMin: state.postArrivalDescentMin,
         lfSafetyMarginFt: state.lfSafetyMarginFt,
         ridgeClearanceFt: state.ridgeClearanceFt,
-        batteryTimeMin: state.batteryTimeMin
+        windMode: state.windMode,
+        windLayers: state.windLayers
       })
     );
   } catch (e) {
@@ -313,17 +335,17 @@ function initMap() {
     interactive: false
   }).addTo(map);
 
-  // 7. Draggable Entity Markers: Ground Station (📡), Landing Field (🛬), Aircraft (✈️)
+  // 7. Entity Markers: Locked by default, unlocked via the top-left Move/Lock buttons
   stationMarker = L.marker([state.lat0, state.lon0], {
-    draggable: true,
+    draggable: false,
     icon: L.divIcon({
       className: 'entity-marker-wrap',
-      iconSize: [36, 36],
-      iconAnchor: [18, 18],
+      iconSize: [34, 34],
+      iconAnchor: [17, 17],
       html: `
-        <div class="entity-pin pin-station" title="תחנת תקשורת קרקעית (גרור לשינוי מיקום)">
+        <div id="pin-el-station" class="entity-pin pin-station" title="תחנת תקשורת קרקעית">
           <span class="pin-badge-label">תחנה</span>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/>
             <path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/>
             <circle cx="12" cy="12" r="2"/>
@@ -338,15 +360,15 @@ function initMap() {
   }).addTo(map);
 
   lfMarker = L.marker([state.latLf, state.lonLf], {
-    draggable: true,
+    draggable: false,
     icon: L.divIcon({
       className: 'entity-marker-wrap',
-      iconSize: [36, 36],
-      iconAnchor: [18, 18],
+      iconSize: [34, 34],
+      iconAnchor: [17, 17],
       html: `
-        <div class="entity-pin pin-lf" title="שדה נחיתה לחירום (גרור לשינוי מיקום)">
+        <div id="pin-el-lf" class="entity-pin pin-lf" title="שדה נחיתה לחירום">
           <span class="pin-badge-label">שדה נחיתה</span>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M2 22h20"/>
             <path d="M3.77 10.77 2 9l2-4.5 1.1.55c.55.28.9.84.9 1.45s.35 1.17.9 1.45L8 8.5l3-6 1.05.53a2 2 0 0 1 1.09 1.52l.72 5.4a2 2 0 0 0 1.09 1.52l4.4 2.2c.42.22.78.55 1.01.96l.6 1.03c.49.88-.06 1.98-1.06 2.1l-1.18.15c-.47.06-.95-.02-1.37-.24L4.29 11.15a2 2 0 0 1-.52-.38Z"/>
           </svg>
@@ -356,16 +378,16 @@ function initMap() {
   }).addTo(map);
 
   uavMarker = L.marker([state.latUav, state.lonUav], {
-    draggable: true,
+    draggable: false,
     zIndexOffset: 500,
     icon: L.divIcon({
       className: 'entity-marker-wrap',
-      iconSize: [38, 38],
-      iconAnchor: [19, 19],
+      iconSize: [36, 36],
+      iconAnchor: [18, 18],
       html: `
-        <div class="entity-pin pin-uav" title="מיקום מטוס (גרור לבדיקת בטיחות בנקודה)">
+        <div id="pin-el-uav" class="entity-pin pin-uav" title="מיקום מטוס">
           <span class="pin-badge-label">מטוס</span>
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/>
           </svg>
         </div>
@@ -373,35 +395,38 @@ function initMap() {
     })
   }).addTo(map);
 
-  // Drag handlers for all 3 markers
+  // Drag handlers for each marker when unlocked
   stationMarker.on('drag', (e) => {
+    if (state.placementMode !== 'station') return;
     const pos = e.target.getLatLng();
     state.lat0 = pos.lat;
     state.lon0 = pos.lng;
-    syncUtmInputs('station', state.lat0, state.lon0);
     drawConcentricRangeRings();
   });
   stationMarker.on('dragend', () => {
+    if (state.placementMode !== 'station') return;
     triggerLosViewshedCompute();
     triggerGlideAndAircraftCompute();
   });
 
   lfMarker.on('drag', (e) => {
+    if (state.placementMode !== 'lf') return;
     const pos = e.target.getLatLng();
     state.latLf = pos.lat;
     state.lonLf = pos.lng;
-    syncUtmInputs('lf', state.latLf, state.lonLf);
     updateDirectGlideLineGeometry();
   });
   lfMarker.on('dragend', () => {
+    if (state.placementMode !== 'lf') return;
     triggerGlideAndAircraftCompute();
+    scheduleAutoWindFetchIfNeeded();
   });
 
   uavMarker.on('drag', (e) => {
+    if (state.placementMode !== 'uav') return;
     const pos = e.target.getLatLng();
     state.latUav = pos.lat;
     state.lonUav = pos.lng;
-    syncUtmInputs('uav', state.latUav, state.lonUav);
     updateDirectGlideLineGeometry();
     if (state.losRayMode === 'uav') {
       const az = initialBearingDeg(state.lat0, state.lon0, state.latUav, state.lonUav);
@@ -409,22 +434,24 @@ function initMap() {
     }
   });
   uavMarker.on('dragend', () => {
+    if (state.placementMode !== 'uav') return;
     triggerGlideAndAircraftCompute();
+    scheduleAutoWindFetchIfNeeded();
     if (state.losRayMode === 'uav') {
       const az = initialBearingDeg(state.lat0, state.lon0, state.latUav, state.lonUav);
       updateLosInspectionRay(az, true);
     }
   });
 
-  // Map click placement based on active placementMode ('uav' | 'station' | 'lf')
+  // Map click moves the unlocked entity ('station' | 'lf' | 'uav')
   map.on('click', (e) => {
     if (state.placementMode === 'uav') {
       state.latUav = e.latlng.lat;
       state.lonUav = e.latlng.lng;
       uavMarker.setLatLng([state.latUav, state.lonUav]);
-      syncUtmInputs('uav', state.latUav, state.lonUav);
       updateDirectGlideLineGeometry();
       triggerGlideAndAircraftCompute();
+      scheduleAutoWindFetchIfNeeded();
       if (state.losRayMode === 'uav') {
         updateLosInspectionRay(
           initialBearingDeg(state.lat0, state.lon0, state.latUav, state.lonUav),
@@ -435,7 +462,6 @@ function initMap() {
       state.lat0 = e.latlng.lat;
       state.lon0 = e.latlng.lng;
       stationMarker.setLatLng([state.lat0, state.lon0]);
-      syncUtmInputs('station', state.lat0, state.lon0);
       drawConcentricRangeRings();
       triggerLosViewshedCompute();
       triggerGlideAndAircraftCompute();
@@ -443,9 +469,9 @@ function initMap() {
       state.latLf = e.latlng.lat;
       state.lonLf = e.latlng.lng;
       lfMarker.setLatLng([state.latLf, state.lonLf]);
-      syncUtmInputs('lf', state.latLf, state.lonLf);
       updateDirectGlideLineGeometry();
       triggerGlideAndAircraftCompute();
+      scheduleAutoWindFetchIfNeeded();
     }
   });
 
@@ -537,7 +563,7 @@ function updateDirectGlideLineGeometry() {
  * Initialize Unified Web Worker (`js/mission-worker.js`)
  */
 function initWorker() {
-  worker = new Worker('/js/mission-worker.js?v=1.0', { type: 'module' });
+  worker = new Worker('/js/mission-worker.js?v=1.2', { type: 'module' });
 
   worker.onmessage = async (e) => {
     const msg = e.data;
@@ -579,7 +605,7 @@ function initWorker() {
       state.lfGroundFt = msg.lfGroundFt;
       state.aircraftStatus = msg.aircraftStatus;
       renderGlidePolygons(msg.lfCatchmentPolygonLatLons, msg.uavRingPolygonLatLons);
-      updateAircraftSafetyDashboard(msg.aircraftStatus);
+      updateAircraftSafetyHud(msg.aircraftStatus);
       if (glideChart && msg.aircraftStatus?.glide) {
         glideChart.setGlideData(msg.aircraftStatus.glide);
       }
@@ -590,7 +616,7 @@ function initWorker() {
       if (msg.reqId !== state.probeReqId) return;
       const probeEl = document.getElementById('hud-val-probe');
       if (probeEl) {
-        probeEl.textContent = `${msg.elevationFt.toLocaleString('en-US')} ft (${msg.elevationM} m)`;
+        probeEl.textContent = `${msg.elevationFt.toLocaleString('en-US')} ft`;
       }
     }
   };
@@ -651,7 +677,6 @@ function renderTerrainSafetyLayers(res) {
 
   if (!state.showTerrainLayer || !res.hasIntersections) return;
 
-  // 1. Shaded safety buffer fill (all terrain >= threshold + horizontal safety distance)
   if (res.safetyFillPolygonsLatLon && res.safetyFillPolygonsLatLon.length > 0) {
     L.polygon(res.safetyFillPolygonsLatLon, {
       renderer: canvasRenderer,
@@ -664,7 +689,6 @@ function renderTerrainSafetyLayers(res) {
     }).addTo(terrainFillGroup);
   }
 
-  // 2. Safety buffer outer boundary lines
   if (res.safetyOutlineLatLon && res.safetyOutlineLatLon.length > 0) {
     L.polyline(res.safetyOutlineLatLon, {
       renderer: canvasRenderer,
@@ -675,7 +699,6 @@ function renderTerrainSafetyLayers(res) {
     }).addTo(terrainOutlineGroup);
   }
 
-  // 3. Continuous red mountain contour lines at (H_UAV - H_Terrain_Clearance)
   if (res.contourLinesLatLon && res.contourLinesLatLon.length > 0) {
     L.polyline(res.contourLinesLatLon, {
       renderer: canvasRenderer,
@@ -869,6 +892,13 @@ function triggerTerrainSafetyCompute(forceRebuildEnvelope = false) {
 
 function triggerGlideAndAircraftCompute() {
   if (!worker) return;
+  const effMin = Math.max(0, state.batteryTimeMin - state.postArrivalDescentMin);
+  const effEl = document.getElementById('readout-effective-glide-min');
+  if (effEl) {
+    effEl.textContent = `${effMin.toFixed(1)} min`;
+    effEl.style.color = effMin > 0 ? '#4ade80' : '#f87171';
+  }
+
   worker.postMessage({
     type: 'COMPUTE_GLIDE_AND_AIRCRAFT',
     payload: {
@@ -880,7 +910,9 @@ function triggerGlideAndAircraftCompute() {
       lfSafetyMarginFt: state.lfSafetyMarginFt,
       ridgeClearanceFt: state.ridgeClearanceFt,
       batteryTimeMin: state.batteryTimeMin,
-      speedRoDPairs: state.speedRoDPairs,
+      postArrivalDescentMin: state.postArrivalDescentMin,
+      glideSpeedKts: state.glideSpeedKts,
+      glideRodFpm: state.glideRodFpm,
       windLayers: state.windLayers,
       showUavGlideRing: state.showUavRingLayer,
       terrainVerticalClearanceFt: state.terrainVerticalClearanceFt,
@@ -891,7 +923,62 @@ function triggerGlideAndAircraftCompute() {
 }
 
 // ---------------------------------------------------------------------------
-// Updating DOM Telemetry & Readouts
+// Real-Time & Forecast Wind Service (per 1,000 ft along Glide Trajectory)
+// ---------------------------------------------------------------------------
+
+async function fetchLiveOrForecastWindProfile() {
+  if (state.windMode === 'manual') return;
+
+  const statusValEl = document.getElementById('wind-status-val');
+  if (statusValEl) {
+    statusValEl.textContent = 'מושך רוחות...';
+  }
+
+  // Midpoint between Aircraft and Landing Field represents the glide corridor
+  const midLat = (state.latUav + state.latLf) / 2.0;
+  const midLon = (state.lonUav + state.lonLf) / 2.0;
+
+  let targetDate = new Date();
+  if (state.windMode === 'forecast' && state.forecastDatetimeIso) {
+    const parsed = new Date(state.forecastDatetimeIso);
+    if (!Number.isNaN(parsed.getTime())) {
+      targetDate = parsed;
+    }
+  }
+
+  try {
+    const res = await fetchWindLayersPer1000Ft(
+      midLat,
+      midLon,
+      targetDate,
+      Math.max(12000, state.hUavFt + 2000)
+    );
+    state.windLayers = res.layers;
+    saveGlideConfig();
+    renderDynamicWindTable();
+    triggerGlideAndAircraftCompute();
+
+    if (statusValEl) {
+      const timeLabel = res.matchedTimeIso ? res.matchedTimeIso.replace('T', ' ') : 'עודכן';
+      statusValEl.textContent = `✓ ${timeLabel}`;
+    }
+  } catch (err) {
+    if (statusValEl) {
+      statusValEl.textContent = 'שגיאת רשת (משתמש באחרון)';
+    }
+  }
+}
+
+function scheduleAutoWindFetchIfNeeded() {
+  if (state.windMode === 'manual') return;
+  if (windFetchDebounceTimer) clearTimeout(windFetchDebounceTimer);
+  windFetchDebounceTimer = setTimeout(() => {
+    fetchLiveOrForecastWindProfile();
+  }, 450);
+}
+
+// ---------------------------------------------------------------------------
+// Updating DOM Telemetry & Compact Collapsible Bottom HUD
 // ---------------------------------------------------------------------------
 
 function updateGlobalAndLosReadouts() {
@@ -914,7 +1001,6 @@ function updateGlobalAndLosReadouts() {
   document.getElementById('note-terrain-thresh-ft').textContent = `${terrainThreshFt.toLocaleString('en-US')} ft`;
   document.getElementById('readout-terrain-h-km').textContent = `${(state.terrainHorizontalSafetyM / 1000).toFixed(2)} km`;
 
-  // Highlight active preset pills
   document.querySelectorAll('[data-alt-preset]').forEach((btn) => {
     btn.classList.toggle('active', Number(btn.dataset.altPreset) === state.hUavFt);
   });
@@ -932,85 +1018,51 @@ function setStatusClass(el, statusClass) {
   el.classList.add(statusClass);
 }
 
-function updateAircraftSafetyDashboard(st) {
+function updateAircraftSafetyHud(st) {
   if (!st) return;
 
-  document.getElementById('readout-lf-ground').textContent = `${st.glide.lfGroundFt.toLocaleString('en-US')} ft ASL`;
-  document.getElementById('glide-chart-summary').textContent = `${st.glide.distToLfKm.toFixed(1)} km | ${st.glide.bearingToLfDeg.toFixed(0)}°`;
+  const lfGroundEl = document.getElementById('readout-lf-ground');
+  if (lfGroundEl) {
+    lfGroundEl.textContent = `שדה: ${st.glide.lfGroundFt.toLocaleString('en-US')} ft`;
+  }
+  const glideSummaryEl = document.getElementById('glide-chart-summary');
+  if (glideSummaryEl) {
+    glideSummaryEl.textContent = `${st.glide.distToLfKm.toFixed(1)} km | ${(st.glide.totalMissionTimeMin || 0).toFixed(1)}/${st.glide.batteryTimeMin} min`;
+  }
 
-  // 1. Terrain Card & Bottom HUD Chip
+  // 1. Terrain Chip in Bottom HUD
   const terrainClass = st.isTerrainSafe
     ? 'status-ok'
     : st.isTerrainVerticalOk
     ? 'status-warn'
     : 'status-danger';
-  setStatusClass(document.getElementById('card-status-terrain'), terrainClass);
   setStatusClass(document.getElementById('hud-chip-terrain'), terrainClass);
-
-  document.getElementById('badge-status-terrain').textContent = st.isTerrainSafe
-    ? 'בטוח'
-    : !st.isTerrainVerticalOk
-    ? 'חריגת גובה!'
-    : 'בתוך חיץ אופקי';
-
-  document.getElementById('val-uav-agl').textContent = `${st.uavAglFt.toLocaleString('en-US')} ft`;
-  document.getElementById('val-uav-ground').textContent = `${st.uavGroundFt.toLocaleString('en-US')} ft ASL`;
-  const vSign = st.verticalTerrainMarginFt >= 0 ? '+' : '';
-  document.getElementById('val-terrain-v-margin').textContent = `${vSign}${st.verticalTerrainMarginFt.toLocaleString('en-US')} ft`;
-  document.getElementById('val-terrain-h-dist').textContent =
-    st.horizontalDistToHazardM >= 15000
-      ? '> 15 km (נקי)'
-      : `${st.horizontalDistToHazardM.toLocaleString('en-US')} m`;
   document.getElementById('hud-val-terrain').textContent = `${st.uavAglFt.toLocaleString('en-US')} ft AGL`;
 
-  // 2. LOS Communication Card & Bottom HUD Chip
+  // 2. LOS Communication Chip in Bottom HUD
   const losClass = st.isLosSafetyOk
     ? 'status-ok'
     : st.isLosMaxOk
     ? 'status-warn'
     : 'status-danger';
-  setStatusClass(document.getElementById('card-status-los'), losClass);
   setStatusClass(document.getElementById('hud-chip-los'), losClass);
-
-  document.getElementById('badge-status-los').textContent = st.isLosSafetyOk
-    ? 'מעל מרווח בטיחות'
-    : st.isLosMaxOk
-    ? 'מתחת למרווח בטיחות'
-    : 'אין קו ראייה!';
-
   const losSign = st.heightAboveLosFt >= 0 ? '+' : '';
-  const losSafeSign = st.losSafetyMarginDiffFt >= 0 ? '+' : '';
-  document.getElementById('val-uav-above-los').textContent = `${losSign}${st.heightAboveLosFt.toLocaleString('en-US')} ft`;
-  document.getElementById('val-uav-min-los').textContent = `${st.minLosAslFt.toLocaleString('en-US')} ft ASL`;
-  document.getElementById('val-los-safety-diff').textContent = `${losSafeSign}${st.losSafetyMarginDiffFt.toLocaleString('en-US')} ft`;
-  document.getElementById('val-uav-station-vec').textContent = `${st.distFromStationKm.toFixed(1)} km | ${st.azimuthFromStationDeg.toFixed(0)}°`;
   document.getElementById('hud-val-los').textContent = `${losSign}${st.heightAboveLosFt.toLocaleString('en-US')} ft`;
 
-  // 3. Emergency Glide Card, Direct Map Line & Bottom HUD Chip
+  // 3. Emergency Glide & Electrical Potential Chip in Bottom HUD
   const g = st.glide;
   const glideClass = g.canGlideToLf ? 'status-ok' : 'status-danger';
-  setStatusClass(document.getElementById('card-status-glide'), glideClass);
   setStatusClass(document.getElementById('hud-chip-glide'), glideClass);
 
-  let glideBadgeText = 'בטווח גלישה בטוח';
-  if (!g.canGlideToLf) {
-    if (g.statusCode === 'BLOCKED_BY_RIDGE') glideBadgeText = 'חסום ע"י רכס בדרך!';
-    else if (g.statusCode === 'BATTERY_LIMIT') glideBadgeText = 'חריגת זמן סוללה!';
-    else if (g.statusCode === 'TOO_LOW_FOR_FIELD') glideBadgeText = 'נמוך מגובה השדה!';
-    else glideBadgeText = 'מחוץ לטווח גלישה!';
-  }
-  document.getElementById('badge-status-glide').textContent = glideBadgeText;
-
-  document.getElementById('val-glide-dist-compare').textContent = `${g.distToLfKm.toFixed(1)} / ${g.maxGlideTowardsLfKm.toFixed(1)} km`;
   const arrSign = g.arrivalMarginFt >= 0 ? '+' : '';
-  document.getElementById('val-glide-arrival-margin').textContent = `${arrSign}${g.arrivalMarginFt.toLocaleString('en-US')} ft`;
-  document.getElementById('val-glide-speed-time').textContent = `${g.optimalSpeedKts.toFixed(0)} kts | ${g.timeToLfMin.toFixed(1)} min`;
-  const ridgeSign = g.minRidgeMarginFt >= 0 ? '+' : '';
-  document.getElementById('val-glide-ridge-margin').textContent = `${ridgeSign}${g.minRidgeMarginFt.toLocaleString('en-US')} ft`;
-
-  document.getElementById('hud-val-glide').textContent = g.canGlideToLf
-    ? `✓ בטווח (${arrSign}${g.arrivalMarginFt} ft)`
-    : `✕ ${glideBadgeText}`;
+  let glideChipText = `✓ בטווח (${arrSign}${g.arrivalMarginFt} ft)`;
+  if (!g.canGlideToLf) {
+    if (g.statusCode === 'BLOCKED_BY_RIDGE') glideChipText = '✕ חסום קרקע';
+    else if (g.statusCode === 'BATTERY_LIMIT') glideChipText = '✕ אין פוטנציאל חשמלי';
+    else if (g.statusCode === 'TOO_LOW_FOR_FIELD') glideChipText = '✕ נמוך מהשדה';
+    else glideChipText = `✕ מחוץ לטווח (${arrSign}${g.arrivalMarginFt} ft)`;
+  }
+  document.getElementById('hud-val-glide').textContent = glideChipText;
 
   // Style direct glide line on map based on glide feasibility
   if (directGlideLineLayer) {
@@ -1040,7 +1092,7 @@ function updateAircraftSafetyDashboard(st) {
     criticalRidgeMarker = null;
   }
 
-  // 4. Overall Combined Status Banner & HUD Badge
+  // 4. Overall Combined HUD Badge
   const overallClass =
     terrainClass === 'status-danger' ||
     losClass === 'status-danger' ||
@@ -1050,109 +1102,40 @@ function updateAircraftSafetyDashboard(st) {
       ? 'status-warn'
       : 'status-ok';
 
-  const bannerEl = document.getElementById('uav-overall-banner');
   const hudBadgeEl = document.getElementById('hud-overall-badge');
-  setStatusClass(bannerEl, overallClass);
   setStatusClass(hudBadgeEl, overallClass);
 
   if (overallClass === 'status-ok') {
-    document.getElementById('uav-banner-title').textContent = '✓ המטוס באזור טיסה בטוח';
-    document.getElementById('uav-banner-sub').textContent =
-      'עומד בדרישות מרווח קרקע, מרווח בטיחות תקשורת ופוטנציאל גלישה לשדה';
     hudBadgeEl.textContent = '✓ בטוח לטיסה';
   } else if (overallClass === 'status-warn') {
-    document.getElementById('uav-banner-title').textContent = '⚠️ התרעת מרווח בטיחות';
-    document.getElementById('uav-banner-sub').textContent =
-      'בקו ראייה ובטווח גלישה, אך מתחת למרווח הבטיחות הנוסף שהוגדר';
     hudBadgeEl.textContent = '⚠️ התרעת מרווח';
   } else {
-    const reasons = [];
-    if (!st.isTerrainSafe) reasons.push('קרבה מסוכנת לקרקע');
-    if (!st.isLosMaxOk) reasons.push('איבוד תקשורת (LOS)');
-    if (!g.canGlideToLf) reasons.push('מחוץ לפוטנציאל גלישה לשדה');
-    document.getElementById('uav-banner-title').textContent = '✕ חריגת בטיחות במיקום המטוס';
-    document.getElementById('uav-banner-sub').textContent = reasons.join(' • ');
     hudBadgeEl.textContent = '✕ חריגת בטיחות';
   }
 }
 
 // ---------------------------------------------------------------------------
-// UTM Coordinate Synchronization & Dynamic Glide Tables (IAS/RoD + Wind)
+// Dynamic Wind Table (1,000 ft steps - Editable in Manual Mode, Read-Only in Auto)
 // ---------------------------------------------------------------------------
-
-function syncUtmInputs(prefix, lat, lon) {
-  const utm = latLonToUtm(lat, lon);
-  const zEl = document.getElementById(`input-${prefix}-zone`);
-  const eEl = document.getElementById(`input-${prefix}-e`);
-  const nEl = document.getElementById(`input-${prefix}-n`);
-  if (zEl) zEl.value = `${utm.zone}${utm.hemisphere}`;
-  if (eEl) eEl.value = utm.easting;
-  if (nEl) nEl.value = utm.northing;
-}
-
-function readUtmInputsToLatLon(prefix) {
-  const rawZone = document.getElementById(`input-${prefix}-zone`).value.trim().toUpperCase();
-  const match = rawZone.match(/^(\d{1,2})\s*([NS]?)$/);
-  const zoneNum = match ? parseInt(match[1], 10) : 36;
-  const hemi = match && match[2] === 'S' ? 'S' : 'N';
-  const easting = parseFloat(document.getElementById(`input-${prefix}-e`).value);
-  const northing = parseFloat(document.getElementById(`input-${prefix}-n`).value);
-  return utmToLatLon(zoneNum, hemi, easting, northing);
-}
-
-function renderDynamicPolarTable() {
-  const container = document.getElementById('polar-rows-container');
-  container.innerHTML = '';
-
-  state.speedRoDPairs.forEach((pair, idx) => {
-    const row = document.createElement('div');
-    row.className = 'dyn-row';
-    row.innerHTML = `
-      <input type="number" class="dyn-input" value="${pair.speed}" min="1" max="300" step="1" data-polar-idx="${idx}" data-field="speed" />
-      <input type="number" class="dyn-input" value="${pair.rod}" min="1" max="10000" step="25" data-polar-idx="${idx}" data-field="rod" />
-      <button type="button" class="btn-del-row" data-del-polar="${idx}" ${state.speedRoDPairs.length <= 2 ? 'disabled' : ''} title="מחק שורה">✕</button>
-    `;
-    container.appendChild(row);
-  });
-
-  container.querySelectorAll('.dyn-input').forEach((inp) => {
-    inp.addEventListener('change', (e) => {
-      const idx = Number(e.target.dataset.polarIdx);
-      const field = e.target.dataset.field;
-      const val = Math.max(1, parseFloat(e.target.value) || 1);
-      state.speedRoDPairs[idx][field] = val;
-      saveGlideConfig();
-      triggerGlideAndAircraftCompute();
-    });
-  });
-
-  container.querySelectorAll('[data-del-polar]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      if (state.speedRoDPairs.length <= 2) return;
-      const idx = Number(btn.dataset.delPolar);
-      state.speedRoDPairs.splice(idx, 1);
-      saveGlideConfig();
-      renderDynamicPolarTable();
-      triggerGlideAndAircraftCompute();
-    });
-  });
-}
 
 function renderDynamicWindTable() {
   const container = document.getElementById('wind-rows-container');
   container.innerHTML = '';
+  const isManual = state.windMode === 'manual';
 
   state.windLayers.forEach((layer, idx) => {
     const row = document.createElement('div');
     row.className = 'dyn-row wind-row';
     row.innerHTML = `
-      <input type="number" class="dyn-input" value="${layer.altitudeKft}" min="0" max="45" step="1" data-wind-idx="${idx}" data-field="altitudeKft" />
-      <input type="number" class="dyn-input" value="${layer.speed}" min="0" max="200" step="1" data-wind-idx="${idx}" data-field="speed" />
-      <input type="number" class="dyn-input" value="${layer.direction}" min="0" max="360" step="5" data-wind-idx="${idx}" data-field="direction" />
-      <button type="button" class="btn-del-row" data-del-wind="${idx}" ${state.windLayers.length <= 1 ? 'disabled' : ''} title="מחק שכבת רוח">✕</button>
+      <input type="number" class="dyn-input" value="${layer.altitudeKft}" min="0" max="45" step="1" data-wind-idx="${idx}" data-field="altitudeKft" ${!isManual ? 'disabled' : ''} />
+      <input type="number" class="dyn-input" value="${layer.speed}" min="0" max="200" step="1" data-wind-idx="${idx}" data-field="speed" ${!isManual ? 'disabled' : ''} />
+      <input type="number" class="dyn-input" value="${layer.direction}" min="0" max="360" step="5" data-wind-idx="${idx}" data-field="direction" ${!isManual ? 'disabled' : ''} />
+      <button type="button" class="btn-del-row" data-del-wind="${idx}" ${!isManual || state.windLayers.length <= 1 ? 'disabled' : ''} title="מחק שכבת רוח">✕</button>
     `;
     container.appendChild(row);
   });
+
+  if (!isManual) return;
 
   container.querySelectorAll('.dyn-input').forEach((inp) => {
     inp.addEventListener('change', (e) => {
@@ -1182,22 +1165,80 @@ function renderDynamicWindTable() {
   });
 }
 
+function updateWindModeUI() {
+  const isRealtime = state.windMode === 'realtime';
+  const isForecast = state.windMode === 'forecast';
+  const isManual = state.windMode === 'manual';
+
+  document.getElementById('btn-wind-realtime').classList.toggle('active', isRealtime);
+  document.getElementById('btn-wind-forecast').classList.toggle('active', isForecast);
+  document.getElementById('btn-wind-manual').classList.toggle('active', isManual);
+
+  document.getElementById('wind-forecast-controls').style.display = isForecast ? 'flex' : 'none';
+  document.getElementById('wind-api-status-row').style.display = isManual ? 'none' : 'flex';
+  document.getElementById('wind-manual-toolbar').style.display = isManual ? 'flex' : 'none';
+
+  renderDynamicWindTable();
+
+  if (isRealtime || isForecast) {
+    fetchLiveOrForecastWindProfile();
+  }
+}
+
 // ---------------------------------------------------------------------------
-// UI Event Bindings
+// On-Map Entity Move / Lock State Management
 // ---------------------------------------------------------------------------
 
-function setPlacementMode(mode) {
-  state.placementMode = mode;
-  document.body.classList.toggle('placement-mode-active', mode !== 'nav');
+function setPlacementMode(targetMode) {
+  const nextMode = state.placementMode === targetMode ? 'nav' : targetMode;
+  state.placementMode = nextMode;
+  document.body.classList.toggle('placement-mode-active', nextMode !== 'nav');
 
-  document.getElementById('btn-mode-nav').classList.toggle('active', mode === 'nav');
-  document.getElementById('btn-mode-uav').classList.toggle('active', mode === 'uav');
-  document.getElementById('btn-mode-station').classList.toggle('active', mode === 'station');
-  document.getElementById('btn-mode-lf').classList.toggle('active', mode === 'lf');
+  const configs = [
+    {
+      mode: 'station',
+      btnId: 'btn-move-station',
+      marker: stationMarker,
+      pinId: 'pin-el-station',
+      labelLocked: 'הזז תחנה',
+      labelUnlocked: 'תחנה פתוחה'
+    },
+    {
+      mode: 'lf',
+      btnId: 'btn-move-lf',
+      marker: lfMarker,
+      pinId: 'pin-el-lf',
+      labelLocked: 'הזז שדה',
+      labelUnlocked: 'שדה פתוח'
+    },
+    {
+      mode: 'uav',
+      btnId: 'btn-move-uav',
+      marker: uavMarker,
+      pinId: 'pin-el-uav',
+      labelLocked: 'הזז מטוס',
+      labelUnlocked: 'מטוס פתוח'
+    }
+  ];
 
-  document.getElementById('btn-place-uav-inline').classList.toggle('active', mode === 'uav');
-  document.getElementById('btn-place-station-inline').classList.toggle('active', mode === 'station');
-  document.getElementById('btn-place-lf-inline').classList.toggle('active', mode === 'lf');
+  for (const cfg of configs) {
+    const isUnlocked = nextMode === cfg.mode;
+    const btn = document.getElementById(cfg.btnId);
+    if (btn) {
+      btn.classList.toggle('active', isUnlocked);
+      btn.innerHTML = `<span class="lock-state">${isUnlocked ? '📍' : '🔒'}</span><span>${
+        isUnlocked ? cfg.labelUnlocked : cfg.labelLocked
+      }</span>`;
+    }
+    if (cfg.marker && cfg.marker.dragging) {
+      if (isUnlocked) cfg.marker.dragging.enable();
+      else cfg.marker.dragging.disable();
+    }
+    const pinEl = document.getElementById(cfg.pinId);
+    if (pinEl) {
+      pinEl.classList.toggle('unlocked', isUnlocked);
+    }
+  }
 }
 
 function switchCategoryTab(tabName) {
@@ -1253,6 +1294,16 @@ function bindUIEvents() {
     toggleBtn.textContent = state.sidebarCollapsed ? 'הרחב ▾' : 'צמצם ▴';
   });
 
+  // Bottom Aircraft HUD Show / Hide Toggle
+  const hudBarEl = document.getElementById('aircraft-hud-bar');
+  const hudToggleBtn = document.getElementById('btn-toggle-hud');
+  hudToggleBtn.addEventListener('click', () => {
+    state.hudCollapsed = !state.hudCollapsed;
+    hudBarEl.classList.toggle('is-collapsed', state.hudCollapsed);
+    document.body.classList.toggle('hud-is-collapsed', state.hudCollapsed);
+    hudToggleBtn.textContent = state.hudCollapsed ? 'נתוני מטוס ▴' : 'הסתר ▾';
+  });
+
   // Category Tabs & Bottom HUD Chip Shortcuts
   document.querySelectorAll('.cat-tab').forEach((btn) => {
     btn.addEventListener('click', () => switchCategoryTab(btn.dataset.tab));
@@ -1270,26 +1321,15 @@ function bindUIEvents() {
     switchCategoryTab('glide');
   });
 
-  // Placement Mode Toolbar & Inline Placement Buttons
-  document.getElementById('btn-mode-nav').addEventListener('click', () => setPlacementMode('nav'));
-  document.getElementById('btn-mode-uav').addEventListener('click', () =>
-    setPlacementMode(state.placementMode === 'uav' ? 'nav' : 'uav')
+  // On-Map Move / Lock Buttons (Station, Landing Field, Aircraft)
+  document.getElementById('btn-move-station').addEventListener('click', () =>
+    setPlacementMode('station')
   );
-  document.getElementById('btn-mode-station').addEventListener('click', () =>
-    setPlacementMode(state.placementMode === 'station' ? 'nav' : 'station')
+  document.getElementById('btn-move-lf').addEventListener('click', () =>
+    setPlacementMode('lf')
   );
-  document.getElementById('btn-mode-lf').addEventListener('click', () =>
-    setPlacementMode(state.placementMode === 'lf' ? 'nav' : 'lf')
-  );
-
-  document.getElementById('btn-place-uav-inline').addEventListener('click', () =>
-    setPlacementMode(state.placementMode === 'uav' ? 'nav' : 'uav')
-  );
-  document.getElementById('btn-place-station-inline').addEventListener('click', () =>
-    setPlacementMode(state.placementMode === 'station' ? 'nav' : 'station')
-  );
-  document.getElementById('btn-place-lf-inline').addEventListener('click', () =>
-    setPlacementMode(state.placementMode === 'lf' ? 'nav' : 'lf')
+  document.getElementById('btn-move-uav').addEventListener('click', () =>
+    setPlacementMode('uav')
   );
 
   // Layer Visibility Pills
@@ -1319,18 +1359,11 @@ function bindUIEvents() {
     triggerGlideAndAircraftCompute();
   });
 
-  const syncUavRingToggle = (enabled) => {
-    state.showUavRingLayer = enabled;
-    document.getElementById('btn-vis-uav-ring').classList.toggle('active', enabled);
-    document.getElementById('chk-uav-glide-ring').checked = enabled;
+  document.getElementById('btn-vis-uav-ring').addEventListener('click', (e) => {
+    state.showUavRingLayer = !state.showUavRingLayer;
+    e.currentTarget.classList.toggle('active', state.showUavRingLayer);
     triggerGlideAndAircraftCompute();
-  };
-  document.getElementById('btn-vis-uav-ring').addEventListener('click', () =>
-    syncUavRingToggle(!state.showUavRingLayer)
-  );
-  document.getElementById('chk-uav-glide-ring').addEventListener('change', (e) =>
-    syncUavRingToggle(e.target.checked)
-  );
+  });
 
   // Base Map Switcher (Topographic vs Orthophoto)
   document.getElementById('btn-map-topo').addEventListener('click', () => {
@@ -1366,67 +1399,7 @@ function bindUIEvents() {
     btn.addEventListener('click', () => onGlobalAltitudeChange(btn.dataset.altPreset));
   });
 
-  // UTM Inputs for Aircraft, Station, Landing Field
-  ['uav', 'station', 'lf'].forEach((prefix) => {
-    ['zone', 'e', 'n'].forEach((field) => {
-      document.getElementById(`input-${prefix}-${field}`).addEventListener('change', () => {
-        const coords = readUtmInputsToLatLon(prefix);
-        if (!coords) return;
-        if (prefix === 'uav') {
-          state.latUav = coords.lat;
-          state.lonUav = coords.lon;
-          uavMarker.setLatLng([state.latUav, state.lonUav]);
-          map.panTo([state.latUav, state.lonUav]);
-          updateDirectGlideLineGeometry();
-          triggerGlideAndAircraftCompute();
-        } else if (prefix === 'station') {
-          state.lat0 = coords.lat;
-          state.lon0 = coords.lon;
-          stationMarker.setLatLng([state.lat0, state.lon0]);
-          map.panTo([state.lat0, state.lon0]);
-          drawConcentricRangeRings();
-          triggerLosViewshedCompute();
-          triggerGlideAndAircraftCompute();
-        } else if (prefix === 'lf') {
-          state.latLf = coords.lat;
-          state.lonLf = coords.lon;
-          lfMarker.setLatLng([state.latLf, state.lonLf]);
-          map.panTo([state.latLf, state.lonLf]);
-          updateDirectGlideLineGeometry();
-          triggerGlideAndAircraftCompute();
-        }
-      });
-    });
-  });
-
-  // GPS Station Button & Copy Station to Landing Field Button
-  document.getElementById('btn-gps-station').addEventListener('click', () => {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        state.lat0 = pos.coords.latitude;
-        state.lon0 = pos.coords.longitude;
-        stationMarker.setLatLng([state.lat0, state.lon0]);
-        map.panTo([state.lat0, state.lon0]);
-        syncUtmInputs('station', state.lat0, state.lon0);
-        drawConcentricRangeRings();
-        triggerLosViewshedCompute();
-        triggerGlideAndAircraftCompute();
-      },
-      () => {}
-    );
-  });
-
-  document.getElementById('btn-copy-station-to-lf').addEventListener('click', () => {
-    state.latLf = state.lat0;
-    state.lonLf = state.lon0;
-    lfMarker.setLatLng([state.latLf, state.lonLf]);
-    syncUtmInputs('lf', state.latLf, state.lonLf);
-    updateDirectGlideLineGeometry();
-    triggerGlideAndAircraftCompute();
-  });
-
-  // Tab 2 (LOS) Specific Controls
+  // Tab 1 (LOS) Specific Controls
   const onLosSafetyChange = (val) => {
     const num = parseFloat(val);
     if (!Number.isFinite(num)) return;
@@ -1517,7 +1490,7 @@ function bindUIEvents() {
     document.getElementById('btn-ray-to-uav').classList.remove('active');
   });
 
-  // Tab 3 (Terrain Safety) Specific Controls
+  // Tab 2 (Terrain Safety) Specific Controls
   const onTerrainVerticalChange = (val) => {
     const num = parseFloat(val);
     if (!Number.isFinite(num)) return;
@@ -1591,31 +1564,80 @@ function bindUIEvents() {
     }
   });
 
-  // Tab 4 (Emergency Glide) Specific Controls
+  // Tab 3 (Emergency Glide, Electrical Potential & Wind Source) Controls
+  document.getElementById('input-glide-speed-kts').addEventListener('change', (e) => {
+    state.glideSpeedKts = Math.max(10, parseFloat(e.target.value) || 60);
+    e.target.value = state.glideSpeedKts;
+    saveGlideConfig();
+    triggerGlideAndAircraftCompute();
+  });
+
+  document.getElementById('input-glide-rod-fpm').addEventListener('change', (e) => {
+    state.glideRodFpm = Math.max(25, parseFloat(e.target.value) || 500);
+    e.target.value = state.glideRodFpm;
+    saveGlideConfig();
+    triggerGlideAndAircraftCompute();
+  });
+
+  document.getElementById('input-battery-min').addEventListener('change', (e) => {
+    state.batteryTimeMin = Math.max(1, parseFloat(e.target.value) || 25);
+    e.target.value = state.batteryTimeMin;
+    saveGlideConfig();
+    triggerGlideAndAircraftCompute();
+  });
+
+  document.getElementById('input-post-descent-min').addEventListener('change', (e) => {
+    state.postArrivalDescentMin = Math.max(0, parseFloat(e.target.value) || 0);
+    e.target.value = state.postArrivalDescentMin;
+    saveGlideConfig();
+    triggerGlideAndAircraftCompute();
+  });
+
   document.getElementById('input-lf-safety-ft').addEventListener('change', (e) => {
     state.lfSafetyMarginFt = Math.max(0, parseFloat(e.target.value) || 0);
+    e.target.value = state.lfSafetyMarginFt;
     saveGlideConfig();
     triggerGlideAndAircraftCompute();
   });
 
   document.getElementById('input-ridge-clear-ft').addEventListener('change', (e) => {
     state.ridgeClearanceFt = Math.max(0, parseFloat(e.target.value) || 0);
+    e.target.value = state.ridgeClearanceFt;
     saveGlideConfig();
     triggerGlideAndAircraftCompute();
   });
 
-  document.getElementById('input-battery-min').addEventListener('change', (e) => {
-    state.batteryTimeMin = Math.max(1, parseFloat(e.target.value) || 1);
+  // Wind Mode Switcher (Real-Time vs Forecast Time vs Manual)
+  document.getElementById('btn-wind-realtime').addEventListener('click', () => {
+    state.windMode = 'realtime';
     saveGlideConfig();
-    triggerGlideAndAircraftCompute();
+    updateWindModeUI();
   });
 
-  document.getElementById('btn-add-polar-row').addEventListener('click', () => {
-    const last = state.speedRoDPairs[state.speedRoDPairs.length - 1] || { speed: 60, rod: 600 };
-    state.speedRoDPairs.push({ speed: last.speed + 10, rod: last.rod + 250 });
+  document.getElementById('btn-wind-forecast').addEventListener('click', () => {
+    state.windMode = 'forecast';
     saveGlideConfig();
-    renderDynamicPolarTable();
-    triggerGlideAndAircraftCompute();
+    updateWindModeUI();
+  });
+
+  document.getElementById('btn-wind-manual').addEventListener('click', () => {
+    state.windMode = 'manual';
+    saveGlideConfig();
+    updateWindModeUI();
+  });
+
+  document.getElementById('input-wind-datetime').addEventListener('change', (e) => {
+    state.forecastDatetimeIso = e.target.value;
+    fetchLiveOrForecastWindProfile();
+  });
+
+  document.getElementById('btn-fetch-forecast-wind').addEventListener('click', () => {
+    state.forecastDatetimeIso = document.getElementById('input-wind-datetime').value;
+    fetchLiveOrForecastWindProfile();
+  });
+
+  document.getElementById('btn-refresh-wind').addEventListener('click', () => {
+    fetchLiveOrForecastWindProfile();
   });
 
   document.getElementById('btn-add-wind-row').addEventListener('click', () => {
@@ -1625,7 +1647,7 @@ function bindUIEvents() {
       direction: 270
     };
     state.windLayers.push({
-      altitudeKft: last.altitudeKft + 5,
+      altitudeKft: last.altitudeKft + 1,
       speed: last.speed,
       direction: last.direction
     });
@@ -1639,12 +1661,26 @@ function bindUIEvents() {
 // Bootstrap Application
 // ---------------------------------------------------------------------------
 
+function initDefaultForecastDatetime() {
+  const now = new Date();
+  now.setMinutes(0, 0, 0);
+  const tzOffsetMs = now.getTimezoneOffset() * 60000;
+  const localIso = new Date(now.getTime() - tzOffsetMs).toISOString().slice(0, 16);
+  state.forecastDatetimeIso = localIso;
+  const dtInput = document.getElementById('input-wind-datetime');
+  if (dtInput) dtInput.value = localIso;
+}
+
 function bootstrap() {
   loadSavedGlideConfig();
+  initDefaultForecastDatetime();
 
+  document.getElementById('input-glide-speed-kts').value = state.glideSpeedKts;
+  document.getElementById('input-glide-rod-fpm').value = state.glideRodFpm;
+  document.getElementById('input-battery-min').value = state.batteryTimeMin;
+  document.getElementById('input-post-descent-min').value = state.postArrivalDescentMin;
   document.getElementById('input-lf-safety-ft').value = state.lfSafetyMarginFt;
   document.getElementById('input-ridge-clear-ft').value = state.ridgeClearanceFt;
-  document.getElementById('input-battery-min').value = state.batteryTimeMin;
 
   initMap();
   initWorker();
@@ -1652,14 +1688,9 @@ function bootstrap() {
   losChart = new LosChartRenderer(document.getElementById('los-chart-canvas'));
   glideChart = new GlideChartRenderer(document.getElementById('glide-chart-canvas'));
 
-  syncUtmInputs('uav', state.latUav, state.lonUav);
-  syncUtmInputs('station', state.lat0, state.lon0);
-  syncUtmInputs('lf', state.latLf, state.lonLf);
-
-  renderDynamicPolarTable();
-  renderDynamicWindTable();
   updateGlobalAndLosReadouts();
   bindUIEvents();
+  updateWindModeUI();
 
   // Launch initial calculations across all 3 engines
   triggerLosViewshedCompute();
